@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "act-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "act-fs",
  "act-kernel",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "act-fs"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "act-kernel",
  "async-trait",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "act-kernel"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "act-web"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "act-kernel",
  "async-trait",

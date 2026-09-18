@@ -1,0 +1,30 @@
+[package]
+name = "act-cli"
+description = "Agent Core Tools CLI and MCP stdio server (binary: act)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "act"
+path = "src/main.rs"
+
+[dependencies]
+act-kernel = { workspace = true }
+act-fs = { workspace = true }
+act-web = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

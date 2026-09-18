@@ -1,0 +1,191 @@
+//! CLI definition (clap) and command dispatch.
+
+use act_kernel::error::{ActError, ActResult};
+use act_kernel::{ActConfig, CommandManager, InvokeMode};
+use clap::{Parser, Subcommand};
+use std::io::Read;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    name = "act",
+    version,
+    about = "Agent Core Tools: sandboxed filesystem & web commands for AI agents",
+    long_about = "Unified command kernel (manager + permission verifier + executor) exposing Fs_* and Web_* commands via CLI and MCP stdio server."
+)]
+pub struct Cli {
+    /// Extra sandbox root (repeatable), added to the configured roots.
+    #[arg(long, global = true)]
+    pub root: Vec<PathBuf>,
+
+    /// Explicit config file path (default: <cwd>/act.config.json or ACT_CONFIG).
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Execute a registered command with a JSON parameter object.
+    Exec {
+        /// Command name, e.g. Fs_ReadFile.
+        command: String,
+        /// JSON parameters ('-' reads stdin).
+        #[arg(long)]
+        input: String,
+    },
+    /// List registered commands.
+    List {
+        /// Output raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Permission dry-run: verify without executing.
+    Verify {
+        command: String,
+        #[arg(long)]
+        input: String,
+    },
+    /// Run as an MCP stdio server.
+    Mcp,
+    /// Install the skill + MCP configuration.
+    Install {
+        /// Install into the current project (.mcp.json + .claude/skills/).
+        #[arg(long)]
+        project: bool,
+        /// Install the skill into the user directory (~/.claude/skills/).
+        #[arg(long)]
+        user: bool,
+        /// Executable path to register in .mcp.json (default: this binary).
+        #[arg(long)]
+        exe: Option<String>,
+        /// Overwrite an existing .mcp.json entry.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+pub fn build_manager(cli: &Cli) -> ActResult<CommandManager> {
+    if let Some(path) = &cli.config {
+        let abs = if path.is_absolute() {
+            path.clone()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        };
+        std::env::set_var("ACT_CONFIG", &abs);
+    }
+    let cwd = std::env::current_dir().map_err(ActError::Io)?;
+    let mut config = ActConfig::load(&cwd)?;
+    for root in &cli.root {
+        let abs = if root.is_absolute() {
+            root.clone()
+        } else {
+            cwd.join(root)
+        };
+        let canon = abs.canonicalize().map_err(|e| {
+            ActError::Config(format!("--root '{}' unavailable: {}", abs.display(), e))
+        })?;
+        if !config.roots.contains(&canon) {
+            config.roots.push(canon);
+        }
+    }
+    let manager = CommandManager::new(config)?;
+    act_fs::register_all(&manager)?;
+    act_web::register_all(&manager)?;
+    Ok(manager)
+}
+
+pub async fn run(cli: Cli) -> ActResult<()> {
+    match cli.command {
+        Command::Exec {
+            ref command,
+            ref input,
+        } => {
+            let manager = build_manager(&cli)?;
+            let params = read_input(&input)?;
+            let result = manager.execute(&command, params, InvokeMode::Cli).await?;
+            print_json(&result);
+            Ok(())
+        }
+        Command::List { json } => {
+            let manager = build_manager(&cli)?;
+            let infos = manager.list();
+            if json {
+                print_json(&serde_json::json!(infos));
+            } else {
+                println!("{:<16} {:<8} DESCRIPTION", "COMMAND", "CAP");
+                for info in infos {
+                    let desc: String = info.description.chars().take(90).collect();
+                    println!("{:<16} {:<8} {}", info.name, info.capability, desc);
+                }
+            }
+            Ok(())
+        }
+        Command::Verify {
+            ref command,
+            ref input,
+        } => {
+            let manager = build_manager(&cli)?;
+            let params = read_input(&input)?;
+            match manager
+                .verify_only(&command, &params, InvokeMode::Cli)
+                .await
+            {
+                Ok(verification) => {
+                    print_json(&serde_json::json!({
+                        "allowed": true,
+                        "paths": verification.paths.iter().map(|(raw, abs, _)| serde_json::json!({
+                            "input": raw,
+                            "resolved": abs.to_string_lossy().replace('\\', "/"),
+                        })).collect::<Vec<_>>(),
+                        "urls": verification.urls.iter().map(|(raw, url)| serde_json::json!({
+                            "input": raw,
+                            "resolved": url.to_string(),
+                        })).collect::<Vec<_>>(),
+                    }));
+                }
+                Err(err) => {
+                    print_json(&serde_json::json!({
+                        "allowed": false,
+                        "error": err.to_string(),
+                        "code": err.code(),
+                    }));
+                }
+            }
+            Ok(())
+        }
+        Command::Mcp => {
+            let manager = build_manager(&cli)?;
+            crate::mcp::serve(manager).await
+        }
+        Command::Install {
+            project,
+            user,
+            exe,
+            force,
+        } => crate::install::run(project, user, exe, force),
+    }
+}
+
+fn read_input(input: &str) -> ActResult<serde_json::Value> {
+    let raw = if input == "-" {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .map_err(|e| ActError::Other(format!("read stdin: {e}")))?;
+        buffer
+    } else {
+        input.to_string()
+    };
+    serde_json::from_str(&raw)
+        .map_err(|e| ActError::invalid_params("input", format!("invalid JSON input: {e}")))
+}
+
+pub fn print_json(value: &serde_json::Value) {
+    match serde_json::to_string_pretty(value) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("serialize output failed: {e}"),
+    }
+}

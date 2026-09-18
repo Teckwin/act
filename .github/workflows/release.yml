@@ -1,0 +1,92 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install aarch64-linux linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Compute version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Package (unix)
+        if: matrix.target != 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          STAGE="act-$VERSION-$TARGET"
+          mkdir -p "dist/$STAGE"
+          cp "target/$TARGET/release/act" "dist/$STAGE/"
+          cp README.md LICENSE act.config.json "dist/$STAGE/"
+          cp -r skill "dist/$STAGE/"
+          tar -czf "dist/$STAGE.tar.gz" -C dist "$STAGE"
+          echo "ASSET=dist/$STAGE.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $stage = "act-$env:VERSION-$env:TARGET"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item "target/$env:TARGET/release/act.exe" "dist/$stage/"
+          Copy-Item README.md, LICENSE, act.config.json "dist/$stage/"
+          Copy-Item -Recurse skill "dist/$stage/skill"
+          Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
+          "ASSET=dist/$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: act-${{ matrix.target }}
+          path: dist/act-*
+          if-no-files-found: error
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}

@@ -1,0 +1,67 @@
+{
+  "roots": ["."],
+  "protected": [
+    "**/.git/**",
+    "**/.git",
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa*",
+    "**/id_ed25519*",
+    "**/.act/**"
+  ],
+  "allow_read_protected": false,
+  "fs": {
+    "delete_mode": "trash",
+    "trash_retention_days": 7,
+    "fallback_encoding": "gbk",
+    "eol": "auto"
+  },
+  "limits": {
+    "max_read_bytes": 8388608,
+    "max_write_bytes": 8388608,
+    "max_batch": 256,
+    "max_find_results": 500,
+    "max_grep_results": 500,
+    "max_depth": 64,
+    "command_timeout_secs": 120,
+    "web_concurrency": 8,
+    "web_timeout_ms": 30000,
+    "fetch_max_bytes": 2097152
+  },
+  "url": {
+    "allowed_domains": [],
+    "blocked_domains": [],
+    "allow_private_ips": false,
+    "max_redirects": 5,
+    "allowed_schemes": ["https", "http"]
+  },
+  "output": {
+    "max_inline_bytes": 32768,
+    "overflow_dir": ".act/overflow",
+    "overflow_retention_days": 7,
+    "compression": {
+      "enabled": true,
+      "algorithm": "extractive",
+      "max_summary_chars": 1000,
+      "llm": {
+        "base_url": null,
+        "model": null,
+        "api_key_env": "ACT_LLM_API_KEY"
+      }
+    }
+  },
+  "engines": {
+    "enabled": ["duckduckgo", "bing"],
+    "google_serpapi_key_env": "SERPAPI_KEY",
+    "brave_api_key_env": "BRAVE_API_KEY",
+    "searxng_url": null
+  },
+  "capabilities": {
+    "cli": { "read": true, "write": true, "net": true },
+    "mcp": { "read": true, "write": true, "net": true }
+  }
+}

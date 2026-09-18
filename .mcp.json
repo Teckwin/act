@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "act": {
+      "args": [
+        "mcp"
+      ],
+      "command": "D:/works/github/agent_core_tools/target/release/act.exe",
+      "env": {}
+    }
+  }
+}

@@ -21,8 +21,10 @@ use crate::error::{ActError, ActResult};
 use crate::name::CommandName;
 pub use crate::registry::{Capability, CommandDef, CommandHandler, OutputSpec, Verify};
 
-/// Reserved CLI subcommand names that can never be command aliases.
-pub const RESERVED_ALIASES: &[&str] = &["help"];
+/// Tokens that can never be command aliases. Since all builtins (help,
+/// list, install, …) are themselves registered commands, no reservation is
+/// needed anymore — kept as an (empty) extension point.
+pub const RESERVED_ALIASES: &[&str] = &[];
 
 /// Validate a short command alias (`fr`, `grep`, …).
 pub fn validate_alias(alias: &str) -> ActResult<()> {
@@ -464,14 +466,14 @@ mod tests {
 
     #[test]
     fn reserved_and_bad_aliases_rejected() {
-        assert!(validate_alias("help").is_err());
         assert!(validate_alias("X").is_err());
         assert!(validate_alias("toolongalias9").is_err());
         assert!(validate_alias("fr").is_ok());
         assert!(validate_alias("mcp").is_ok());
+        assert!(validate_alias("help").is_ok());
 
         let err = expect_err(
-            CommandBuilder::new("Fs_Demo", "d", Capability::Read, "help")
+            CommandBuilder::new("Fs_Demo", "d", Capability::Read, "1x")
                 .param(Param::string("path").required())
                 .output_done(json!({}))
                 .bind(std::sync::Arc::new(Noop)),

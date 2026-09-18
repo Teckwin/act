@@ -1,17 +1,18 @@
-//! act: Agent Core Tools — single dynamic CLI.
+//! act: Agent Core Tools — assembly root.
 //!
-//! One invocation style: `act <Command|alias> --flags ...`. All verbs,
-//! including the kernel management commands (Sys_List/Sys_Verify/Sys_Schema/
-//! Sys_Package/Sys_Install/Sys_Serve), are registered through the same
-//! CommandBuilder contract pipeline. Global flags (`--config`, `--root`) may
-//! precede the command name.
+//! Layering (single responsibility per layer):
+//! 1. `parser` (CLI): argv → `(cmd, params)` normalization ONLY
+//! 2. `kernel.exec(cmd, params, ctx)`: schema conformance + path/url
+//!    normalization & security blocking + dispatch + output contract + audit
+//!
+//! Every verb — including help and management — is a registered command.
 
 mod cli;
-mod flags;
 mod gen;
 mod install;
 mod mcp;
 mod package;
+mod parser;
 mod schema;
 mod sys;
 #[cfg(test)]
@@ -51,27 +52,10 @@ fn init_tracing() {
         .init();
 }
 
-const HELP: &str = "\
-act <Command|alias> --flags ...        # only invocation style
-
-Global flags (before the command name):
-  --config <path>   explicit config file (default: <cwd>/act.config.json or ACT_CONFIG)
-  --root <path>     extra sandbox root (repeatable)
-
-Discover commands:
-  act Sys_List                        # (alias: list) all commands + aliases
-  act Sys_Schema                      # (alias: schema) full machine contract
-  act Sys_Verify --target fr --path a # (alias: verify) permission dry-run
-
-Examples:
-  act Fs_ReadFile --path src/main.rs --limit 100
-  act fr -p src/main.rs               # short aliases
-  act Fs_EditFile --path a.rs --edit \"old=>new\"
-";
-
-/// Split leading global flags (`--config v`, `--root v`, repeatable) from the
-/// rest of the command line.
-fn split_globals(raw: &[String]) -> ActResult<(Option<PathBuf>, Vec<PathBuf>, Vec<String>)> {
+/// Build the runtime context from leading global flags (`--config`, `--root`)
+/// and return the remaining argv for the parser. This is context assembly —
+/// not command routing.
+fn split_context(raw: &[String]) -> ActResult<(Option<PathBuf>, Vec<PathBuf>, Vec<String>)> {
     let mut config = None;
     let mut roots = Vec::new();
     let mut i = 0usize;
@@ -81,42 +65,33 @@ fn split_globals(raw: &[String]) -> ActResult<(Option<PathBuf>, Vec<PathBuf>, Ve
             Some((n, v)) => (n.to_string(), Some(v.to_string())),
             None => (token.trim_start_matches('-').to_string(), None),
         };
+        let value = |i: &mut usize| -> Option<String> {
+            match inline.clone() {
+                Some(v) => Some(v),
+                None => {
+                    *i += 1;
+                    raw.get(*i).cloned()
+                }
+            }
+        };
         match name.as_str() {
             "config" => {
-                let value = match inline {
-                    Some(v) => v,
-                    None => {
-                        i += 1;
-                        match raw.get(i) {
-                            Some(v) => v.clone(),
-                            None => {
-                                return Err(act_kernel::ActError::invalid_params(
-                                    "cli",
-                                    "--config expects a value",
-                                ));
-                            }
-                        }
-                    }
-                };
-                config = Some(PathBuf::from(value));
+                config = value(&mut i).map(PathBuf::from);
+                if config.is_none() {
+                    return Err(act_kernel::ActError::invalid_params(
+                        "cli",
+                        "--config expects a value",
+                    ));
+                }
             }
             "root" => {
-                let value = match inline {
-                    Some(v) => v,
-                    None => {
-                        i += 1;
-                        match raw.get(i) {
-                            Some(v) => v.clone(),
-                            None => {
-                                return Err(act_kernel::ActError::invalid_params(
-                                    "cli",
-                                    "--root expects a value",
-                                ));
-                            }
-                        }
-                    }
+                let Some(v) = value(&mut i) else {
+                    return Err(act_kernel::ActError::invalid_params(
+                        "cli",
+                        "--root expects a value",
+                    ));
                 };
-                roots.push(PathBuf::from(value));
+                roots.push(PathBuf::from(v));
             }
             _ => break,
         }
@@ -132,27 +107,28 @@ async fn main() {
     init_tracing();
 
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    if raw.is_empty() || raw.iter().any(|t| t == "-h" || t == "--help") {
-        print!("{HELP}");
-        return;
-    }
-    if raw.iter().any(|t| t == "-V" || t == "--version") {
-        println!("act {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
-
-    let outcome: ActResult<()> = match split_globals(&raw) {
-        Ok((_config, _roots, rest)) if rest.is_empty() => {
-            print!("{HELP}");
-            Ok(())
-        }
-        Ok((config, roots, rest)) => match cli::build_manager_with(config, roots) {
-            Ok(manager) => {
-                crate::sys::bind_manager(std::sync::Arc::new(manager));
-                cli::run_dynamic(&rest[0], &rest[1..]).await
+    let outcome: ActResult<()> = match split_context(&raw) {
+        Ok((config, roots, rest)) => {
+            match cli::build_manager_with(config, roots) {
+                Ok(manager) => {
+                    let arc = std::sync::Arc::new(manager);
+                    sys::bind_manager(arc.clone());
+                    // Layer 1: parse (normalization). Layer 2: kernel exec.
+                    let resolver = |token: &str| sys::resolve_info(token);
+                    match parser::parse_command(&rest, &resolver) {
+                        Ok((cmd, params)) => match arc.exec(&cmd, params).await {
+                            Ok(result) => {
+                                cli::print_json(&result);
+                                Ok(())
+                            }
+                            Err(err) => Err(err),
+                        },
+                        Err(err) => Err(err),
+                    }
+                }
+                Err(err) => Err(err),
             }
-            Err(err) => Err(err),
-        },
+        }
         Err(err) => Err(err),
     };
 

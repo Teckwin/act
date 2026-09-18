@@ -4,7 +4,7 @@
 //! registered command reached via `act <Command|alias> --flags`.
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{ActConfig, CommandManager, InvokeMode};
+use act_kernel::{ActConfig, CommandManager};
 use std::path::PathBuf;
 
 /// Build the manager from explicit config/roots (config file defaults to the
@@ -42,29 +42,6 @@ pub fn build_manager_with(
     crate::sys::register_all(&manager)?;
     Ok(manager)
 }
-
-/// Execute a dynamic command: `act <Command> --flags ...` or `act <alias> ...`.
-/// The first token is a registered command name or short alias; the rest are
-/// schema-driven flags parsed by `flags::parse`. Uses the manager bound in
-/// `main` (see sys::bind_manager).
-pub async fn run_dynamic(name: &str, args: &[String]) -> ActResult<()> {
-    let manager = crate::sys::manager()?;
-    // Canonical command name or short alias (fr → Fs_ReadFile).
-    let def = manager
-        .resolve_def(name)
-        .ok_or_else(|| ActError::UnknownCommand(name.to_string()))?;
-    let canonical = def.name.as_str().to_string();
-    let infos = manager.list();
-    let info = infos
-        .iter()
-        .find(|c| c.name == canonical)
-        .ok_or_else(|| ActError::UnknownCommand(canonical.clone()))?;
-    let params = crate::flags::parse(info, args)?;
-    let result = manager.execute(&canonical, params, InvokeMode::Cli).await?;
-    print_json(&result);
-    Ok(())
-}
-
 pub fn print_json(value: &serde_json::Value) {
     match serde_json::to_string_pretty(value) {
         Ok(text) => println!("{text}"),

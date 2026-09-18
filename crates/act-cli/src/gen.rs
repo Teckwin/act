@@ -339,7 +339,7 @@ pub fn validate_examples(manager: &CommandManager) -> Vec<String> {
             problems.push(format!("{}: missing example", info.name));
             continue;
         }
-        if let Err(err) = crate::flags::parse_example(&def, &info) {
+        if let Err(err) = crate::parser::parse_example(&def, &info) {
             problems.push(format!(
                 "{}: example rejected by parser: {}",
                 info.name, err

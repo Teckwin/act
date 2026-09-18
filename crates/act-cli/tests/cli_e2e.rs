@@ -90,7 +90,15 @@ fn flags_mode_write_gbk_read_edit_flow() {
         String::from_utf8_lossy(&out.stderr)
     );
     let out = Command::new(ACT)
-        .args(["Fs_EditFile", "--path", "cn.txt", "--edit", "旧=>新"])
+        .args([
+            "Fs_EditFile",
+            "--path",
+            "cn.txt",
+            "--old",
+            "旧",
+            "--new",
+            "新",
+        ])
         .current_dir(tmp.path())
         .output()
         .unwrap();

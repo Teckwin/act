@@ -70,6 +70,7 @@ pub fn register_all(manager: &CommandManager) -> ActResult<()> {
 
 fn definitions() -> Vec<CommandDef> {
     vec![
+        sys_help(),
         sys_list(),
         sys_verify(),
         sys_schema(),
@@ -80,6 +81,78 @@ fn definitions() -> Vec<CommandDef> {
     .into_iter()
     .collect::<Result<Vec<_>, _>>()
     .expect("builtin Sys definitions must be valid")
+}
+
+// ---------- Sys_Help ----------
+
+struct SysHelp;
+
+#[async_trait]
+impl CommandHandler for SysHelp {
+    async fn execute(&self, params: Value, _ctx: &SandboxContext) -> ActResult<Value> {
+        let version_only = params
+            .get("version")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let manager = manager()?;
+        if version_only {
+            return Ok(json!({
+                "ok": true, "command": "Sys_Help",
+                "version": env!("CARGO_PKG_VERSION"),
+            }));
+        }
+        // Fully generated from the live registry — zero hardcoded command lists.
+        let mut help = format!(
+            "act {} — unified sandboxed command kernel\n\n\
+             USAGE\n  act <Command|alias> --flags ...\n\n\
+             DISCOVER\n  act Sys_List            (alias list)   all commands + aliases\n\
+             \x20 act Sys_Schema           (alias schema)  full machine contract\n\
+             \x20 act Sys_Verify -t <cmd>  (alias verify)  permission dry-run\n\n\
+             EXAMPLES\n",
+            env!("CARGO_PKG_VERSION"),
+        );
+        for info in manager.list() {
+            if let Some(example) = info.example.as_deref() {
+                if !example.is_empty() && info.name != "Sys_Help" {
+                    help.push_str(&format!("  act {} {}\n", info.name, example));
+                }
+            }
+        }
+        help.push_str("\nCOMMANDS\n");
+        for info in manager.list() {
+            let alias = info.cmd_aliases.first().map(String::as_str).unwrap_or("-");
+            let desc: String = info.description.chars().take(72).collect();
+            help.push_str(&format!(
+                "  {:<17} {:<7} {:<5} {}\n",
+                info.name, alias, info.capability, desc
+            ));
+        }
+        Ok(json!({
+            "ok": true, "command": "Sys_Help",
+            "version": env!("CARGO_PKG_VERSION"),
+            "help": help,
+        }))
+    }
+}
+
+fn sys_help() -> ActResult<CommandDef> {
+    CommandBuilder::new(
+        "Sys_Help",
+        "Kernel help: usage, examples and the full command table — generated from the live registry (aliases: -h/--help/-V/--version dispatch here).",
+        Capability::Meta,
+        "help",
+    )
+    .param(Param::boolean("version").default(json!(false)).desc("仅出版本号"))
+    .output_done(json!({
+        "type": "object", "required": ["ok", "command", "version"],
+        "properties": {
+            "ok": { "type": "boolean" }, "command": { "const": "Sys_Help" },
+            "version": { "type": "string" },
+            "help": { "type": "string", "description": "version=false 时：用法+示例+命令表" }
+        }
+    }))
+    .example("")
+    .bind(Arc::new(SysHelp))
 }
 
 // ---------- Sys_List ----------

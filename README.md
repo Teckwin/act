@@ -139,12 +139,18 @@ docs/DESIGN.md      完整设计文档（中文）
 
 ## CI / 发布
 
-- **CI**（`ci.yml`）：ubuntu / windows / macos 三平台 `cargo test --workspace` + 中文读写冒烟。
-- **Release**（`release.yml`）：推送 `v*` tag 触发五目标矩阵构建（Linux x64/ARM64、Windows x64、macOS Intel/Apple Silicon），自动打包 `tar.gz` / `zip` 并附到 GitHub Release；手动 `workflow_dispatch` 可仅产 artifacts 不发布。
+发布流程（严格遵循）：
+
+1. **commit / PR → CI 验证**：`ci.yml` 在 ubuntu / windows / macos 三平台跑 `cargo test --workspace` + 中文读写冒烟；
+2. **CI 全绿后打 tag 发布**：`release.yml` 由 `v*` tag 触发五目标矩阵构建（Linux x64/ARM64、Windows x64、macOS Intel/Apple Silicon），自动打包 `tar.gz` / `zip` 并附到 GitHub Release。
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0   # 触发发布
+git commit -am "fix: ..." && git push          # 1. 先看 CI 绿
+gh run watch --repo Teckwin/act $(gh run list --repo Teckwin/act -L1 --json databaseId --jq '.[0].databaseId')
+git tag v0.1.1 && git push origin v0.1.1     # 2. 再触发发布
 ```
+
+手动 `workflow_dispatch` 可仅产 artifacts 不发布。
 
 ## 测试
 

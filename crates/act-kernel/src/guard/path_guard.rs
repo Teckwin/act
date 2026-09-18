@@ -164,10 +164,23 @@ impl PathGuard {
             });
         }
 
-        // Lexical containment gate (before any fs access).
-        let (root_idx, lexical_rel) = self
-            .match_root(&normalized)
-            .ok_or_else(|| deny(&normalized, &self.roots))?;
+        // Lexical containment gate (before any fs access). On macOS the user
+        // may pass a symlinked prefix (e.g. /var/... for /private/var/...),
+        // so when the lexically-normalized path misses every root we retry
+        // against the fully canonicalized path before denying.
+        let mut effective = normalized.clone();
+        let mut root_match = self.match_root(&effective);
+        if root_match.is_none() {
+            if let Ok(canon) = std::fs::canonicalize(&normalized) {
+                let canon = strip_verbatim(&canon);
+                if let Some(matched) = self.match_root(&canon) {
+                    effective = canon;
+                    root_match = Some(matched);
+                }
+            }
+        }
+        let (root_idx, lexical_rel) =
+            root_match.ok_or_else(|| deny(&normalized, &self.roots))?;
 
         // Incremental canonicalization with symlink re-validation.
         let root = self.roots[root_idx].clone();
@@ -280,9 +293,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let g = guard_in(tmp.path());
         let (p, idx) = g.resolve("a/b.txt").unwrap();
+        let root = strip_verbatim(&std::fs::canonicalize(tmp.path()).unwrap());
         assert_eq!(idx, 0);
-        assert!(p.starts_with(tmp.path()));
-        assert_eq!(p, tmp.path().join("a/b.txt"));
+        assert!(p.starts_with(&root));
+        assert_eq!(p, root.join("a/b.txt"));
     }
 
     #[test]
@@ -328,7 +342,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
         let g = guard_in(tmp.path());
         let (p, _) = g.resolve("a/b/../c.txt").unwrap();
-        assert_eq!(p, tmp.path().join("a").join("c.txt"));
+        let root = strip_verbatim(&std::fs::canonicalize(tmp.path()).unwrap());
+        assert_eq!(p, root.join("a").join("c.txt"));
     }
 
     #[test]
@@ -337,8 +352,28 @@ mod tests {
         std::fs::create_dir(tmp.path().join("src")).unwrap();
         let g = guard_in(tmp.path());
         let (p, _) = g.resolve("src/new/deep/file.rs").unwrap();
-        assert!(p.starts_with(tmp.path()));
-        assert_eq!(p, tmp.path().join("src/new/deep/file.rs"));
+        let root = strip_verbatim(&std::fs::canonicalize(tmp.path()).unwrap());
+        assert!(p.starts_with(&root));
+        assert_eq!(p, root.join("src/new/deep/file.rs"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_prefix_resolves_into_root() {
+        // macOS-style: the sandbox root canonicalizes to /private/var/... but
+        // the user passes /var/... — must be accepted, not denied.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), b"x").unwrap();
+        let canon = std::fs::canonicalize(tmp.path()).unwrap();
+        // Build a symlinked alias for the tempdir (works on linux & macos).
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("alias");
+        std::os::unix::fs::symlink(&canon, &alias).unwrap();
+        let g = PathGuard::new(vec![canon]).unwrap();
+        let via_alias = alias.join("f.txt");
+        let (p, _) = g.resolve(via_alias.to_str().unwrap()).unwrap();
+        assert!(p.ends_with("f.txt"));
+        assert!(g.is_within(&p));
     }
 
     #[test]

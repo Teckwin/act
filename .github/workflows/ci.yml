@@ -30,7 +30,9 @@ jobs:
       - name: Smoke test (act list / act exec)
         shell: bash
         run: |
-          cargo run -q --locked --bin act -- list | head -5
+          cargo run -q --locked --bin act -- list > /tmp/act-list.txt
+          head -5 /tmp/act-list.txt
           echo "hello act 中文" > smoke.txt
-          cargo run -q --locked --bin act -- exec Fs_ReadFile --input '{"paths":["smoke.txt"]}' | grep -q "hello act 中文"
+          cargo run -q --locked --bin act -- exec Fs_ReadFile --input '{"paths":["smoke.txt"]}' > /tmp/act-read.json
+          grep -q "hello act 中文" /tmp/act-read.json
           rm smoke.txt

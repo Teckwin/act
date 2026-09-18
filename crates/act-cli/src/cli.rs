@@ -50,6 +50,14 @@ pub enum Command {
     },
     /// Run as an MCP stdio server.
     Mcp,
+    /// Print the machine-readable command contract (schemas + errors + limits).
+    Schema,
+    /// Stage the self-contained skill bundle and zip it (SKILL.md + schema.json + mcp.json + this binary).
+    Package {
+        /// Output directory for the staged folder and the zip.
+        #[arg(long, default_value = "dist")]
+        out: PathBuf,
+    },
     /// Install the skill + MCP configuration.
     Install {
         /// Install into the current project (.mcp.json + .claude/skills/).
@@ -159,6 +167,17 @@ pub async fn run(cli: Cli) -> ActResult<()> {
         Command::Mcp => {
             let manager = build_manager(&cli)?;
             crate::mcp::serve(manager).await
+        }
+        Command::Schema => {
+            let manager = build_manager(&cli)?;
+            print_json(&crate::schema::build(&manager));
+            Ok(())
+        }
+        Command::Package { out } => {
+            let zip_path = crate::package::run(&out)?;
+            println!("staged: {}", out.join("agent-core-tools").display());
+            println!("zip: {}", zip_path.display());
+            Ok(())
         }
         Command::Install {
             project,

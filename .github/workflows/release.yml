@@ -9,8 +9,33 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: Prepare skill sources (SKILL.md / mcp.json / schema.json)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate schema.json from the kernel binary
+        run: |
+          cargo build --release --locked --bin act
+          mkdir -p skill-src
+          cp packaging/skill/agent-core-tools/SKILL.md skill-src/
+          cp packaging/skill/agent-core-tools/mcp.json skill-src/
+          target/release/act schema > skill-src/schema.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skill-src
+          path: skill-src/
+          if-no-files-found: error
+
   build:
-    name: Build ${{ matrix.target }}
+    name: Bundle ${{ matrix.target }}
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -55,35 +80,43 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Package (unix)
+      - name: Download skill sources
+        uses: actions/download-artifact@v4
+        with:
+          name: skill-src
+          path: skill-src
+
+      - name: Stage skill bundle
+        shell: bash
+        run: |
+          EXE=""; [[ "$TARGET" == *windows* ]] && EXE=".exe"
+          STAGE="dist/agent-core-tools"
+          mkdir -p "$STAGE"
+          cp skill-src/SKILL.md skill-src/schema.json skill-src/mcp.json "$STAGE/"
+          cp "target/$TARGET/release/act$EXE" "$STAGE/"
+          ls -la "$STAGE"
+
+      - name: Zip (unix)
         if: matrix.target != 'x86_64-pc-windows-msvc'
         shell: bash
         run: |
-          STAGE="act-$VERSION-$TARGET"
-          mkdir -p "dist/$STAGE"
-          cp "target/$TARGET/release/act" "dist/$STAGE/"
-          cp README.md LICENSE act.config.json "dist/$STAGE/"
-          cp -r skill "dist/$STAGE/"
-          tar -czf "dist/$STAGE.tar.gz" -C dist "$STAGE"
-          echo "ASSET=dist/$STAGE.tar.gz" >> "$GITHUB_ENV"
+          ASSET="agent-core-tools-$VERSION-$TARGET.zip"
+          (cd dist && zip -r "../$ASSET" agent-core-tools)
+          echo "ASSET=dist/$ASSET" >> "$GITHUB_ENV"
 
-      - name: Package (windows)
+      - name: Zip (windows)
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
-          $stage = "act-$env:VERSION-$env:TARGET"
-          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
-          Copy-Item "target/$env:TARGET/release/act.exe" "dist/$stage/"
-          Copy-Item README.md, LICENSE, act.config.json "dist/$stage/"
-          Copy-Item -Recurse skill "dist/$stage/skill"
-          Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
-          "ASSET=dist/$stage.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $asset = "agent-core-tools-$env:VERSION-$env:TARGET.zip"
+          Compress-Archive -Path dist/agent-core-tools -DestinationPath "dist/$asset"
+          "ASSET=dist/$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: act-${{ matrix.target }}
-          path: dist/act-*
+          name: agent-core-tools-${{ matrix.target }}
+          path: dist/agent-core-tools-*.zip
           if-no-files-found: error
 
       - name: Upload release asset

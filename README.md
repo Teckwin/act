@@ -24,35 +24,38 @@ act mcp   # 作为 MCP server 运行
 
 ## 安装
 
-### 方式一：下载预编译二进制（推荐）
+### 方式一：下载 skill 分发包（推荐）
 
-从 [Releases](https://github.com/TeckWin/act/releases) 下载对应平台压缩包（CI 自动构建）：
+从 [Releases](https://github.com/TeckWin/act/releases) 下载对应平台的 `agent-core-tools-<ver>-<target>.zip`（自包含 skill 目录，开箱即用）：
 
 | 产物 | 平台 |
 |---|---|
-| `act-<ver>-x86_64-pc-windows-msvc.zip` | Windows 10/11 x64 |
-| `act-<ver>-x86_64-unknown-linux-gnu.tar.gz` | Linux x64 (glibc) |
-| `act-<ver>-aarch64-unknown-linux-gnu.tar.gz` | Linux ARM64 (glibc) |
-| `act-<ver>-x86_64-apple-darwin.tar.gz` | macOS Intel |
-| `act-<ver>-aarch64-apple-darwin.tar.gz` | macOS Apple Silicon |
+| `agent-core-tools-<ver>-x86_64-pc-windows-msvc.zip` | Windows 10/11 x64 |
+| `agent-core-tools-<ver>-x86_64-unknown-linux-gnu.zip` | Linux x64 (glibc) |
+| `agent-core-tools-<ver>-aarch64-unknown-linux-gnu.zip` | Linux ARM64 (glibc) |
+| `agent-core-tools-<ver>-x86_64-apple-darwin.zip` | macOS Intel |
+| `agent-core-tools-<ver>-aarch64-apple-darwin.zip` | macOS Apple Silicon |
 
-解压后得到 `act`/`act.exe`、示例配置与 skill 目录，加入 `PATH` 即可：
+每个 zip 内为完整 skill 目录（`SKILL.md` 命令契约 + `schema.json` 机器可读契约 + `mcp.json` 配置模板 + `act`/`act.exe` 二进制）：
 
 ```bash
-tar -xzf act-*-x86_64-unknown-linux-gnu.tar.gz -C /usr/local/bin --strip-components=1 --wildcards '*/act'
-act --version
+# 用户级安装（~/.claude/skills/）
+unzip agent-core-tools-*-x86_64-unknown-linux-gnu.zip -d ~/.claude/skills/
+cd ~/.claude/skills/agent-core-tools && ./act install --user
+
+# 或项目级安装（<project>/.claude/skills/ + 写入 .mcp.json）
+unzip agent-core-tools-*.zip -d <project>/.claude/skills/
+cd <project>/.claude/skills/agent-core-tools && ./act install --project
 ```
 
 Windows（PowerShell）：
 
 ```powershell
-Expand-Archive act-*-x86_64-pc-windows-msvc.zip -DestinationPath C:\Tools\act
-$env:PATH += ";C:\Tools\act\act-*"
-act --version
+Expand-Archive agent-core-tools-*-x86_64-pc-windows-msvc.zip -DestinationPath $HOME\.claude\skills\
+& $HOME\.claude\skills\agent-core-tools\act.exe install --user
 ```
 
-> 压缩包内含 `README.md`、`LICENSE`、`act.config.json`（示例配置）与 `skill/`（Metacode 接入指南），`act install` 会自动内嵌安装 skill，无需手动复制。
-
+> `act install` 以**本机实际路径**写入 `.mcp.json`（自动检测解压位置，不携带构建机路径），并在 skill 目录补齐 `schema.json`/`mcp.json`。手动配置则把包内 `mcp.json` 的 `<SKILL_DIR>` 替换为解压后的绝对路径。
 ### 方式二：从源码构建
 
 要求 Rust 1.80+（无 OpenSSL 等本地依赖，rustls 纯 Rust TLS）：
@@ -132,7 +135,8 @@ crates/act-kernel   内核：注册表/五守卫/执行器/审计/输出策略/�
 crates/act-fs       Fs_* 指令 + 编码引擎 + trash + 原子写
 crates/act-web      Web_* 指令 + HTTP管线 + 引擎注册表 + 调研管线
 crates/act-cli      二进制 act：CLI + MCP stdio 服务端 + install
-skill/              交付用 SKILL.md（act install 会自动安装）
+packaging/skill/    分发包模板源：SKILL.md（命令契约）+ mcp.json（配置模板）
+dist/               本地打包产出（act package，gitignored）
 docs/DESIGN.md      完整设计文档（中文）
 .github/workflows   CI（三平台测试）+ Release（五目标打包发布）
 ```
@@ -142,7 +146,7 @@ docs/DESIGN.md      完整设计文档（中文）
 发布流程（严格遵循）：
 
 1. **commit / PR → CI 验证**：`ci.yml` 在 ubuntu / windows / macos 三平台跑 `cargo test --workspace` + 中文读写冒烟；
-2. **CI 全绿后打 tag 发布**：`release.yml` 由 `v*` tag 触发五目标矩阵构建（Linux x64/ARM64、Windows x64、macOS Intel/Apple Silicon），自动打包 `tar.gz` / `zip` 并附到 GitHub Release。
+2. **CI 全绿后打 tag 发布**：`release.yml` 先由 prepare 任务用内核二进制生成与实现同步的 `schema.json`，再五目标矩阵打包 `agent-core-tools-<ver>-<target>.zip`（SKILL.md+schema.json+mcp.json+二进制）附到 GitHub Release；本地等价命令：`cargo run --bin act -- package --out dist`。
 
 ```bash
 git commit -am "fix: ..." && git push          # 1. 先看 CI 绿

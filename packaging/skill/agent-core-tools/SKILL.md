@@ -8,6 +8,25 @@ description: Sandboxed, encoding-safe file and web tools for agents. Use when re
 统一沙箱内核：19 条命令（16 条 `Fs_*` + 3 条 `Web_*`），MCP 工具名 `mcp__act__<Command>`，CLI 等价 `act exec <Command> --input '<json>'`。
 本文档是**唯一权威契约**：输入 Schema、校验规则、输出字段、错误对照均与实现一一对应。
 
+## 安装（分发包）
+
+发布资产：`agent-core-tools-<version>-<target>.zip`，解压后即完整 skill 目录：
+
+```
+agent-core-tools/
+├── SKILL.md      # 本契约（人/agent 可读）
+├── schema.json   # 机器可读全量契约：19 命令 schema + 错误码表 + 生效限额（由内核生成，永远与二进制同步）
+├── mcp.json      # MCP 配置模板（<SKILL_DIR> 占位符）
+└── act | act.exe # 内核二进制（当前平台）
+```
+
+安装步骤：
+1. 解压 zip 到 `~/.claude/skills/`（用户级）或 `<project>/.claude/skills/`（项目级）；
+2. 在解压目录运行 `./act install --user` 或 `--project`——用**本机实际路径**写入 `.mcp.json`（项目级）并补齐 skill 文件，不会残留构建机路径；
+3. 重启 Metacode/Claude Code，出现 `mcp__act__*` 工具即成功。
+
+手动配置（不用 install）：把 `mcp.json` 内容粘到 MCP 配置，将 `<SKILL_DIR>` 替换为解压后的绝对路径（Windows 二进制名为 `act.exe`）。
+
 ## 0. 使用规则
 
 1. 优先用本命令集，禁止在可用时改用 shell（`cat`/`grep`/`find`/`curl`）。
@@ -439,8 +458,10 @@ MCP 错误内容为 `content[0].text = {"code":"...","message":"..."}`；CLI std
 ```bash
 act exec <Command> --input '<json>'    # 执行；--input - 读 stdin
 act verify <Command> --input '<json>'  # 权限预检（不执行）→ {allowed, paths[], urls[]} | {allowed:false, error, code}
+act schema                            # 输出机器可读契约（即 schema.json 内容，限额为当前配置生效值）
 act list [--json]                      # 命令清单+schema
-act install --project|--user [--force] # 安装 .mcp.json + 本 skill
+act package [--out dist]              # 本地打包 skill 分发 zip（SKILL.md+schema.json+mcp.json+本二进制）
+act install --project|--user [--force] # 用本机实际路径写 .mcp.json + 补齐 skill 目录（SKILL.md/schema.json/mcp.json）
 ```
 
 - MCP：`tools/list` 返回 `name/description/inputSchema`（与本文件 Schema 一致）；`tools/call` 失败时 `isError:true`，text 为 `{"code","message"}`。

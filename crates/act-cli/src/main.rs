@@ -3,6 +3,8 @@
 mod cli;
 mod install;
 mod mcp;
+mod package;
+mod schema;
 
 use act_kernel::error::ActResult;
 use clap::Parser;

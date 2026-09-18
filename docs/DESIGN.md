@@ -18,7 +18,7 @@ Agent 使用宿主内置工具（shell + cat/grep/find/curl 等）时的典型�
 ## 2. 总体架构
 
 ```
-入口层   act exec <Cmd> --input <json>        act mcp (stdio JSON-RPC 2.0)
+入口层   act <Command|alias> --flags …              act Sys_Serve (可选 MCP stdio)
               │                                    │
 ┌─────────────▼────────────────────────────────────▼──────────────┐
 │ Kernel (act-kernel)                                              │
@@ -140,9 +140,9 @@ result 序列化 > output.max_inline_bytes(默认 32KB)？
 ## 9. CLI / MCP 接口
 
 ```
-act exec <Cmd> --input '<json>'      # 执行（--input - 读 stdin）
+act <Command|alias> --flags …      # 唯一入口（parser 归一化 → kernel.exec）
 act list [--json]                    # 命令清单
-act verify <Cmd> --input '<json>'    # 权限预检（不执行）
+act Sys_Verify -t <Cmd> --<目标flags>   # 权限预检（透传目标命令 flags，不执行）
 act mcp                              # MCP stdio 服务端
 act install --project [--user] [--exe <path>] [--force]
 ```

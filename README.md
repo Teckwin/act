@@ -7,8 +7,8 @@
 Rust 实现的跨平台 Agent 常用工具库。统一内核（CommandManager + PermissionVerifier + CommandExecutor）托管注册全部指令：**16 条 Fs_\* 文件/目录指令 + 3 条 Web_\* 抓取/搜索/调研指令**，通过 CLI 与 MCP stdio 服务对外，替代 Agent 内置文件/搜索工具，根治编码乱码、越界访问与不可审计问题。
 
 ```
-act exec Fs_ReadFile --input '{"paths":["src/main.rs","docs/设计.md"]}'
-act exec Web_Research --input '{"topic":"mcp protocol adoption"}'
+act Fs_ReadFile --path src/main.rs
+act Web_Research --topic "mcp protocol adoption"
 act mcp   # 作为 MCP server 运行
 ```
 
@@ -70,10 +70,10 @@ cargo build --release
 ## 快速开始
 
 ```bash
-act list                          # 查看全部 19 条指令
-act exec Fs_ReadFile --input '{"paths":["README.md"]}'
-act exec Fs_WriteFile --input '{"files":[{"path":"cn.txt","content":"中文内容","encoding":"gbk"}]}'
-act exec Web_Research --input '{"topic":"mcp protocol adoption"}'
+act Sys_List                       # 查看全部 26 条指令（19 业务 + 7 Sys 管理）
+act Fs_ReadFile --path README.md
+act Fs_WriteFile --path cn.txt --content 中文内容 --encoding gbk
+act Web_Research --topic "mcp protocol adoption"
 ```
 
 ### 接入 Metacode / Claude Code
@@ -99,7 +99,7 @@ cd your-project
 
 重启 Metacode 后即可使用 `mcp__act__Fs_ReadFile`、`mcp__act__Web_Search` 等工具替代内置 Read/Grep/Glob/WebFetch/WebSearch。
 
-## 指令速查（19 条）
+## 指令速查（19 条业务指令 + 7 条 Sys 管理指令）
 
 | 域 | 指令 |
 |---|---|
@@ -107,6 +107,7 @@ cd your-project
 | 目录 | Fs_CreateDir · Fs_ListDir · Fs_MoveDir · Fs_CopyDir · Fs_RemoveDir |
 | 搜索 | Fs_FindFile（glob）· Fs_GrepFile（regex 内容搜索，编码感知） |
 | Web | Web_Fetch（并行抓取转 Markdown）· Web_Search（多引擎并行+RRF）· Web_Research（带引用调研报告） |
+| Sys | Sys_Help · Sys_List · Sys_Verify · Sys_Schema · Sys_Package · Sys_Install · Sys_Serve |
 
 参数规范：路径/URL 独立成批量字段，便于统一校验与拦截。完整参数表见 `skill/SKILL.md` 或 `act list --json`。
 

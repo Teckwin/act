@@ -12,6 +12,11 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025
 const SERVER_NAME: &str = "agent-core-tools";
 
 pub async fn serve(manager: CommandManager) -> ActResult<()> {
+    serve_arc(std::sync::Arc::new(manager)).await
+}
+
+/// Serve over an already-shared manager (used by Sys_Serve).
+pub async fn serve_arc(manager: std::sync::Arc<CommandManager>) -> ActResult<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();

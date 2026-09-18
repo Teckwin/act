@@ -93,7 +93,7 @@ async fn edit_replaces_and_preserves_gbk() {
     let out = exec_cmd(
         &m,
         "Fs_EditFile",
-        json!({"path": "e.txt", "edits": [{"old": "旧", "new": "新"}]}),
+        json!({"path": "e.txt", "old": ["旧"], "new": ["新"]}),
     )
     .await
     .unwrap();
@@ -111,7 +111,7 @@ async fn edit_ambiguity_rejected_file_untouched() {
     let err = exec_cmd(
         &m,
         "Fs_EditFile",
-        json!({"path": "amb.txt", "edits": [{"old": "a", "new": "b"}]}),
+        json!({"path": "amb.txt", "old": ["a"], "new": ["b"]}),
     )
     .await
     .unwrap_err();
@@ -271,7 +271,7 @@ async fn protected_paths_denied_across_commands() {
         ("Fs_MoveFile", json!({"from": ".env", "to": "leak.txt"})),
         (
             "Fs_EditFile",
-            json!({"path": ".env", "edits": [{"old": "S", "new": "X"}]}),
+            json!({"path": ".env", "old": ["S"], "new": ["X"]}),
         ),
     ];
     for (command, params) in cases {

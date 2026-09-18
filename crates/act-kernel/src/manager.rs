@@ -104,6 +104,15 @@ impl CommandManager {
     }
 
     /// Execute a command by name. This is the only route to any handler.
+    /// Kernel exec — the single authoritative entry:
+    /// `exec(cmd, params, context)` = schema validation + path/url
+    /// normalization & security blocking + handler dispatch + output
+    /// contract check + audit. CLI mode.
+    pub async fn exec(&self, cmd: &str, params: Value) -> ActResult<Value> {
+        self.execute(cmd, params, InvokeMode::Cli).await
+    }
+
+    /// Channel-aware execute (MCP servers pass InvokeMode::Mcp).
     pub async fn execute(&self, name: &str, params: Value, mode: InvokeMode) -> ActResult<Value> {
         let started = Instant::now();
         let def = self
@@ -147,23 +156,28 @@ impl CommandManager {
                     );
                     return Err(err);
                 }
-                // Output policy (overflow + summary).
-                let final_result = self
-                    .output
-                    .apply(name, result, &self.sandbox)
-                    .await
-                    .map_err(|err| {
-                        self.audit_record(
-                            &mode,
-                            name,
-                            audit_paths.clone(),
-                            audit_urls.clone(),
-                            false,
-                            &err,
-                            started,
-                        );
-                        err
-                    })?;
+                // Output policy (overflow + summary). Meta commands
+                // (Sys_Schema/Sys_List --json …) emit the contract document
+                // itself and must never be compressed.
+                let final_result = if def.capability == crate::registry::Capability::Meta {
+                    result
+                } else {
+                    self.output
+                        .apply(name, result, &self.sandbox)
+                        .await
+                        .map_err(|err| {
+                            self.audit_record(
+                                &mode,
+                                name,
+                                audit_paths.clone(),
+                                audit_urls.clone(),
+                                false,
+                                &err,
+                                started,
+                            );
+                            err
+                        })?
+                };
                 self.audit_record(
                     &mode,
                     name,
@@ -316,7 +330,11 @@ mod tests {
     #[async_trait]
     impl crate::registry::CommandHandler for Echo {
         async fn execute(&self, params: Value, _ctx: &SandboxContext) -> ActResult<Value> {
-            Ok(params)
+            let mut out = params;
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("ok".into(), json!(true));
+            }
+            Ok(out)
         }
     }
 
@@ -328,30 +346,40 @@ mod tests {
         CommandManager::new(cfg).expect("manager")
     }
 
+    fn register_echo(
+        m: &CommandManager,
+        name: &str,
+        cap: crate::registry::Capability,
+        param: crate::builder::Param,
+        field: &str,
+    ) {
+        let def = crate::builder::CommandBuilder::new(name, "echo test", cap, "et")
+            .param(param.required().verify(crate::registry::Verify::PathLike))
+            .output_done(json!({ "type": "object", "required": ["ok"] }))
+            .bind(Arc::new(Echo))
+            .unwrap();
+        m.register(def).unwrap();
+        let _ = field;
+    }
+
     #[tokio::test]
     async fn happy_path_and_audit() {
         let tmp = tempfile::tempdir().unwrap();
         let m = manager_in(tmp.path());
-        m.register(
-            CommandDef::new(
-                "Fs_ReadFile",
-                "echo test",
-                crate::registry::Capability::Read,
-                json!({}),
-                vec!["/paths/*".into()],
-                vec![],
-                Arc::new(Echo),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        register_echo(
+            &m,
+            "Fs_ReadFile",
+            crate::registry::Capability::Read,
+            crate::builder::Param::string("path"),
+            "/path",
+        );
 
         std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
         let out = m
-            .execute("Fs_ReadFile", json!({"paths": ["a.txt"]}), InvokeMode::Cli)
+            .execute("Fs_ReadFile", json!({"path": "a.txt"}), InvokeMode::Cli)
             .await
             .unwrap();
-        assert_eq!(out["paths"][0], "a.txt");
+        assert_eq!(out["path"], "a.txt");
 
         let audit = std::fs::read_to_string(tmp.path().join(".act/audit.jsonl")).unwrap();
         assert!(audit.contains("\"command\":\"Fs_ReadFile\""));
@@ -373,24 +401,18 @@ mod tests {
     async fn traversal_denied_and_audited() {
         let tmp = tempfile::tempdir().unwrap();
         let m = manager_in(tmp.path());
-        m.register(
-            CommandDef::new(
-                "Fs_ReadFile",
-                "echo test",
-                crate::registry::Capability::Read,
-                json!({}),
-                vec!["/paths/*".into()],
-                vec![],
-                Arc::new(Echo),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        register_echo(
+            &m,
+            "Fs_ReadFile",
+            crate::registry::Capability::Read,
+            crate::builder::Param::string("path"),
+            "/path",
+        );
 
         let err = m
             .execute(
                 "Fs_ReadFile",
-                json!({"paths": ["../../outside.txt"]}),
+                json!({"path": "../../outside.txt"}),
                 InvokeMode::Mcp,
             )
             .await
@@ -406,24 +428,18 @@ mod tests {
     async fn protected_path_denied() {
         let tmp = tempfile::tempdir().unwrap();
         let m = manager_in(tmp.path());
-        m.register(
-            CommandDef::new(
-                "Fs_WriteFile",
-                "echo test",
-                crate::registry::Capability::Write,
-                json!({}),
-                vec!["/files/*/path".into()],
-                vec![],
-                Arc::new(Echo),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        register_echo(
+            &m,
+            "Fs_WriteFile",
+            crate::registry::Capability::Write,
+            crate::builder::Param::string("path"),
+            "/path",
+        );
 
         let err = m
             .execute(
                 "Fs_WriteFile",
-                json!({"files": [{"path": ".git/config", "content": "x"}]}),
+                json!({"path": ".git/config"}),
                 InvokeMode::Cli,
             )
             .await

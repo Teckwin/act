@@ -4,6 +4,7 @@ pub mod capability_guard;
 pub mod limit_guard;
 pub mod path_guard;
 pub mod protect_guard;
+pub mod schema_guard;
 pub mod url_guard;
 
 use std::path::{Path, PathBuf};
@@ -66,7 +67,11 @@ impl PermissionVerifier {
         // Guard 1: capability per invocation mode.
         capability_guard::check(&def.capability, &self.capabilities, mode)?;
 
-        // Guard 2 + 3: path containment and protected globs.
+        // Guard 2: schema conformance (required/type/enum/range) — enforced
+        // uniformly for every channel: CLI parser, MCP JSON, direct exec.
+        schema_guard::validate(def, params)?;
+
+        // Guard 3 + 4: path containment and protected globs.
         let mut paths = Vec::new();
         for field in &def.path_fields {
             for raw in crate::param::extract_strings(params, field) {
@@ -82,7 +87,7 @@ impl PermissionVerifier {
             }
         }
 
-        // Guard 4: URL policy (scheme/domain/private-IP/SSRF).
+        // Guard 5: URL policy (scheme/domain/private-IP/SSRF).
         let mut urls = Vec::new();
         for field in &def.url_fields {
             for raw in crate::param::extract_strings(params, field) {
@@ -91,7 +96,7 @@ impl PermissionVerifier {
             }
         }
 
-        // Guard 5: numeric limits and batch size.
+        // Guard 6: numeric limits and batch size.
         let total_items = paths.len() + urls.len();
         if total_items > self.limits.max_batch {
             return Err(ActError::LimitExceeded {

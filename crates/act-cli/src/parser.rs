@@ -1,28 +1,72 @@
-//! Schema-driven CLI flag parser: turns `act Fs_ReadFile --path a.rs --limit 10`
-//! into the JSON params consumed by the kernel.
+//! CLI parser layer — SINGLE RESPONSIBILITY: normalization only.
 //!
-//! The param schema in each CommandDef is the single source of truth:
-//! - `string`  → `--name value`
-//! - `integer` / `number` → `--name 42` (bad numbers rejected)
-//! - `boolean` → `--name` (=true) / `--name=false` / `--no-name` (=false)
-//! - `array of string/integer` → `--name a,b,c` (comma split) and/or repeatable
-//! - `array of object` / `object` → `--name '{json}'`; `--edit "old=>new"`
-//!   sugar is repeatable (Fs_EditFile)
-//! Unknown flags and missing required fields are rejected with invalid_params.
+//! Turns `act Fs_ReadFile --path a.rs --limit 10` into
+//! `kernel.exec("Fs_ReadFile", {"path":"a.rs","limit":10}, context)`:
+//! command/alias resolution, flag → typed JSON conversion, sugar expansion.
+//!
+//! It deliberately does NOT validate constraints or security:
+//! - schema conformance (required/enum/min/max) → kernel `SchemaGuard`
+//! - path normalization (relative → absolute) and sandbox escape blocking
+//!   (`../../../`) → kernel `PathGuard`, driven by `Param::verify(PathLike)`
+//! - URL policy/SSRF → kernel `UrlGuard`, driven by `Param::verify(UrlLike)`
 
 use act_kernel::error::{ActError, ActResult};
 use act_kernel::{CommandDef, CommandInfo};
 use serde_json::{json, Map, Value};
 
-pub fn is_builtin_subcommand(token: &str) -> bool {
-    matches!(
-        token,
-        "exec" | "list" | "verify" | "mcp" | "schema" | "package" | "install" | "help"
-    )
+/// Full CLI entry parse: `argv → (command, params)`.
+///
+/// - empty / `-h` / `--help` / `-V` / `--version` → dispatches to the
+///   registered `Sys_Help` command (nothing hardcoded at the call site)
+/// - leading global flags (`--config`, `--root`) are consumed as runtime
+///   context via env (`ACT_CONFIG`) / extra roots handled by the caller
+/// - first token is a command name or short alias; the rest are flags
+pub fn parse_command(
+    argv: &[String],
+    resolver: &dyn Fn(&str) -> Option<CommandInfo>,
+) -> ActResult<(String, Value)> {
+    let mut rest = argv;
+    // Global context flags may precede the command name.
+    loop {
+        match rest.first().map(|s| s.as_str()) {
+            Some("--config") | Some("--root") if rest.len() >= 2 => {
+                // consumed by the caller (context building); skip here
+                rest = &rest[2..];
+            }
+            Some(token) if token.starts_with("--config=") || token.starts_with("--root=") => {
+                rest = &rest[1..];
+            }
+            _ => break,
+        }
+    }
+    let Some(first) = rest.first() else {
+        return Ok(("Sys_Help".into(), json!({})));
+    };
+    match first.as_str() {
+        "-h" | "--help" => return Ok(("Sys_Help".into(), json!({}))),
+        "-V" | "--version" => return Ok(("Sys_Help".into(), json!({ "version": true }))),
+        _ => {}
+    }
+    let Some(info) = resolver(first) else {
+        return Err(ActError::UnknownCommand(first.clone()));
+    };
+    let canonical = info.name.clone();
+    let params = parse_with(&info, &rest[1..], resolver)?;
+    Ok((canonical, params))
 }
 
 /// Parse flag arguments into a JSON params object for the given command.
+/// Uses the live registry for Sys_Verify's pass-through resolution.
 pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
+    parse_with(info, args, &|token: &str| crate::sys::resolve_info(token))
+}
+
+/// Core parser with an injectable command resolver (tests pass a stub).
+pub fn parse_with(
+    info: &CommandInfo,
+    args: &[String],
+    resolver: &dyn Fn(&str) -> Option<CommandInfo>,
+) -> ActResult<Value> {
     let props = info
         .input_schema
         .get("properties")
@@ -37,6 +81,15 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
         .collect();
 
     let mut out = Map::new();
+    // Pass-through state for Sys_Verify: unknown flags are parsed against the
+    // TARGET command's schema and collected under `target_params`.
+    let passthrough = info
+        .input_schema
+        .get("x-passthrough")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut target_params: Option<Map<String, Value>> = None;
+    let mut target_info_cache: Option<Option<CommandInfo>> = None;
     let mut i = 0usize;
     while i < args.len() {
         let token = &args[i];
@@ -47,14 +100,14 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
             if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_digit()) {
                 return Err(ActError::invalid_params(
                     &info.name,
-                    format!("unexpected positional argument '{token}'; use --flags (JSON channel: act exec)"),
+                    format!("unexpected positional argument '{token}'"),
                 ));
             }
             rest
         } else {
             return Err(ActError::invalid_params(
                 &info.name,
-                format!("unexpected positional argument '{token}'; use --flags (JSON channel: act exec)"),
+                format!("unexpected positional argument '{token}'"),
             ));
         };
         let (flag_name, inline_value) = match stripped.split_once('=') {
@@ -72,11 +125,54 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
             ));
         }
 
-        // Resolve alias → canonical property name.
-        let (canonical, negated) = resolve(&flag_name, props, &aliases, &info.name)?;
-        let schema_prop = props.get(&canonical).ok_or_else(|| {
-            ActError::invalid_params(&info.name, format!("unknown flag --{flag_name}"))
-        })?;
+        // Resolve alias → canonical property name. For Sys_Verify
+        // (x-passthrough), unknown flags are parsed against the TARGET
+        // command's schema and collected under `target_params`.
+        let (canonical, negated, schema_prop, in_target) =
+            match resolve(&flag_name, props, &aliases, &info.name) {
+                Ok((canonical, negated)) => {
+                    let prop = props
+                        .get(&canonical)
+                        .cloned()
+                        .unwrap_or_else(|| json!("string"));
+                    (canonical, negated, prop, false)
+                }
+                Err(err) => {
+                    if !passthrough {
+                        return Err(err);
+                    }
+                    let target = match &target_info_cache {
+                        Some(cached) => cached.clone(),
+                        None => {
+                            let cached = passthrough_target(args, resolver);
+                            target_info_cache = Some(cached.clone());
+                            cached
+                        }
+                    };
+                    let Some(target) = target else {
+                        return Err(err);
+                    };
+                    let target_props = target
+                        .input_schema
+                        .get("properties")
+                        .and_then(|v| v.as_object())
+                        .cloned()
+                        .unwrap_or_default();
+                    let target_aliases: Vec<(String, String)> = target
+                        .cli_aliases
+                        .iter()
+                        .map(|(a, b)| (normalize_flag(a), b.clone()))
+                        .collect();
+                    let (canonical, negated) =
+                        resolve(&flag_name, &target_props, &target_aliases, &info.name)
+                            .map_err(|_| err)?;
+                    let prop = target_props
+                        .get(&canonical)
+                        .cloned()
+                        .unwrap_or(json!("string"));
+                    (canonical, negated, prop, true)
+                }
+            };
         let prop_type = schema_prop
             .get("type")
             .and_then(|t| t.as_str())
@@ -122,55 +218,66 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
                         &canonical,
                         prop_type,
                         &raw,
-                        schema_prop,
+                        &schema_prop,
                     )?,
                     true,
                 )
             }
         };
 
-        merge(
-            &mut out, &canonical, value, prop_type, &info.name, &flag_name,
-        )?;
+        if in_target {
+            let entry = target_params.get_or_insert_with(Map::new);
+            merge(entry, &canonical, value, prop_type, &info.name, &flag_name)?;
+        } else {
+            merge(
+                &mut out, &canonical, value, prop_type, &info.name, &flag_name,
+            )?;
+        }
         let _ = consumed_next;
         i += 1;
     }
 
-    // Fs_EditFile sugar: top-level replace_all applies to every edit that did
-    // not set it explicitly.
-    if info.name == "Fs_EditFile" {
-        if out.get("replace_all").and_then(|v| v.as_bool()) == Some(true) {
-            if let Some(Value::Array(edits)) = out.get_mut("edits") {
-                for edit in edits.iter_mut() {
-                    if edit.get("replace_all").is_none() {
-                        edit["replace_all"] = json!(true);
-                    }
-                }
-            }
-        }
+    if let Some(target_params) = target_params {
+        out.insert("target_params".into(), Value::Object(target_params));
     }
 
-    // Required-field validation (fail fast with a helpful message).
-    if let Some(required) = info.input_schema.get("required").and_then(|r| r.as_array()) {
-        let missing: Vec<String> = required
-            .iter()
-            .filter_map(|r| r.as_str())
-            .filter(|name| !out.contains_key(*name))
-            .map(|s| format!("--{}", s.replace('_', "-")))
-            .collect();
-        if !missing.is_empty() {
-            return Err(ActError::invalid_params(
-                &info.name,
-                format!("missing required flag(s): {}", missing.join(", ")),
-            ));
-        }
-    }
+    // NOTE: no command-specific post-processing here — paired params like
+    // Fs_EditFile's --old/--new zip inside the handler; the parser is a pure
+    // normalization layer.
+
+    // NOTE: required/enum/min/max validation is intentionally NOT done here —
+    // the kernel's SchemaGuard enforces the declared contract for every
+    // channel (CLI, MCP, direct exec) uniformly.
 
     Ok(Value::Object(out))
 }
 
 fn normalize_flag(name: &str) -> String {
     name.trim_matches('-').replace('_', "-")
+}
+
+/// Pre-scan `--target <name>` / `--target=<name>` / `-t <name>` and resolve
+/// the target command metadata for pass-through flag parsing (Sys_Verify).
+fn passthrough_target(
+    args: &[String],
+    resolver: &dyn Fn(&str) -> Option<CommandInfo>,
+) -> Option<CommandInfo> {
+    let mut i = 0;
+    while i < args.len() {
+        let token = &args[i];
+        let value = if let Some(v) = token.strip_prefix("--target=") {
+            Some(v.to_string())
+        } else if token == "--target" || token == "-t" {
+            args.get(i + 1).cloned()
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            return resolver(&value);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Resolve a flag (alias or canonical) to a property name. `--no-x` negates
@@ -225,12 +332,14 @@ fn convert(
 ) -> ActResult<Value> {
     match prop_type {
         "string" => Ok(json!(raw)),
-        "integer" => raw.parse::<i64>().map(|n| json!(n)).map_err(|_| {
-            ActError::invalid_params(command, format!("--{flag} expects an integer, got '{raw}'"))
-        }),
-        "number" => raw.parse::<f64>().map(|n| json!(n)).map_err(|_| {
-            ActError::invalid_params(command, format!("--{flag} expects a number, got '{raw}'"))
-        }),
+        "integer" => raw
+            .parse::<i64>()
+            .map(|n| json!(n))
+            .map_err(|_| ActError::invalid_params(command, format!("--{flag} expects an integer, got '{raw}'"))),
+        "number" => raw
+            .parse::<f64>()
+            .map(|n| json!(n))
+            .map_err(|_| ActError::invalid_params(command, format!("--{flag} expects a number, got '{raw}'"))),
         "boolean" => match raw {
             "true" => Ok(json!(true)),
             "false" => Ok(json!(false)),
@@ -244,63 +353,31 @@ fn convert(
                 .pointer("/items/type")
                 .and_then(|t| t.as_str())
                 .unwrap_or("string");
-            // Object items are never comma-split (values may contain commas);
-            // repeatability of the flag accumulates entries.
-            let parts: Vec<&str> = if item_type == "object" {
-                vec![raw]
-            } else {
-                raw.split(',').collect()
-            };
             let mut items: Vec<Value> = Vec::new();
-            for part in parts {
+            for part in raw.split(',') {
                 match item_type {
                     "integer" => items.push(json!(part.parse::<i64>().map_err(|_| {
-                        ActError::invalid_params(
-                            command,
-                            format!("--{flag} expects integers, got '{part}'"),
-                        )
+                        ActError::invalid_params(command, format!("--{flag} expects integers, got '{part}'"))
                     })?)),
                     "number" => items.push(json!(part.parse::<f64>().map_err(|_| {
-                        ActError::invalid_params(
-                            command,
-                            format!("--{flag} expects numbers, got '{part}'"),
-                        )
+                        ActError::invalid_params(command, format!("--{flag} expects numbers, got '{part}'"))
                     })?)),
-                    "object" => items.push(parse_object_value(command, flag, part)?),
                     _ => items.push(json!(part)),
                 }
             }
             Ok(Value::Array(items))
         }
-        "object" => parse_object_value(command, flag, raw),
         other => Err(ActError::invalid_params(
             command,
-            format!("--{flag}: unsupported parameter type '{other}'"),
+            format!(
+                "--{flag}: type '{other}' is not expressible as a CLI flag; object/array-of-object params are programmatic-channel only (MCP / library exec)"
+            ),
         )),
     }
     .map(|v| {
         let _ = canonical;
         v
     })
-}
-
-/// `--edit "old=>new"` sugar (array-of-object flags) or raw JSON object.
-fn parse_object_value(command: &str, flag: &str, raw: &str) -> ActResult<Value> {
-    let raw = raw.trim();
-    if raw.starts_with('{') {
-        return serde_json::from_str(raw).map_err(|e| {
-            ActError::invalid_params(command, format!("--{flag} expects a JSON object: {e}"))
-        });
-    }
-    if flag == "edit" {
-        if let Some((old, new)) = raw.split_once("=>") {
-            return Ok(json!({ "old": old, "new": new }));
-        }
-    }
-    Err(ActError::invalid_params(
-        command,
-        format!("--{flag} expects a JSON object or (for --edit) \"old=>new\""),
-    ))
 }
 
 fn merge(
@@ -349,7 +426,7 @@ pub fn parse_example(def: &CommandDef, info: &CommandInfo) -> ActResult<Value> {
         .as_deref()
         .ok_or_else(|| ActError::Other(format!("command {} has no example", def.name)))?;
     let args = shell_words(example);
-    parse(info, &args)
+    parse_with(info, &args, &|token: &str| crate::sys::resolve_info(token))
 }
 
 /// Minimal shell-like word splitting (quotes preserved for values).
@@ -395,9 +472,9 @@ mod tests {
             capability: "read",
             input_schema: def.param_schema.clone(),
             output_schema: def.output_schema.clone(),
-            cli_aliases: def.cli_aliases.clone(),
             outputs: Vec::new(),
             cmd_aliases: def.cmd_aliases.clone(),
+            cli_aliases: def.cli_aliases.clone(),
             example: def.example.clone(),
             path_fields: def.path_fields.clone(),
             url_fields: def.url_fields.clone(),
@@ -406,7 +483,7 @@ mod tests {
 
     #[test]
     fn parses_basic_flags() {
-        let v = parse(
+        let v = parse_with(
             &info(),
             &[
                 "--path".into(),
@@ -416,6 +493,7 @@ mod tests {
                 "--limit".into(),
                 "10".into(),
             ],
+            &|_| None,
         )
         .unwrap();
         assert_eq!(v["path"], json!("a.rs"));
@@ -425,22 +503,22 @@ mod tests {
 
     #[test]
     fn inline_equals_form() {
-        let v = parse(&info(), &["--path=a.rs".into(), "--limit=7".into()]).unwrap();
+        let v = parse_with(
+            &info(),
+            &["--path=a.rs".into(), "--limit=7".into()],
+            &|_| None,
+        )
+        .unwrap();
         assert_eq!(v["path"], json!("a.rs"));
         assert_eq!(v["limit"], json!(7));
     }
 
     #[test]
-    fn missing_required_rejected() {
-        let err = parse(&info(), &[]).unwrap_err();
-        assert!(err.to_string().contains("--path"), "{err}");
-    }
-
-    #[test]
     fn unknown_flag_rejected() {
-        let err = parse(
+        let err = parse_with(
             &info(),
             &["--path".into(), "a".into(), "--bogus".into(), "1".into()],
+            &|_| None,
         )
         .unwrap_err();
         assert!(matches!(err, ActError::InvalidParams { .. }));
@@ -448,9 +526,10 @@ mod tests {
 
     #[test]
     fn bad_integer_rejected() {
-        let err = parse(
+        let err = parse_with(
             &info(),
             &["--path".into(), "a".into(), "--limit".into(), "abc".into()],
+            &|_| None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("integer"));
@@ -465,14 +544,14 @@ mod tests {
             capability: "read",
             input_schema: def.param_schema.clone(),
             output_schema: Value::Null,
-            cli_aliases: def.cli_aliases.clone(),
             outputs: Vec::new(),
             cmd_aliases: def.cmd_aliases.clone(),
+            cli_aliases: def.cli_aliases.clone(),
             example: None,
             path_fields: vec![],
             url_fields: vec![],
         };
-        let v = parse(
+        let v = parse_with(
             &info,
             &[
                 "--root".into(),
@@ -482,6 +561,7 @@ mod tests {
                 "--no-gitignore".into(),
                 "--hidden".into(),
             ],
+            &|_| None,
         )
         .unwrap();
         assert_eq!(v["respect_gitignore"], json!(false));
@@ -489,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_sugar_and_replace_all() {
+    fn edit_paired_old_new_repeatable() {
         let def = crate::test_support::fs_edit_def();
         let info = CommandInfo {
             name: def.name.as_str().to_string(),
@@ -497,30 +577,34 @@ mod tests {
             capability: "write",
             input_schema: def.param_schema.clone(),
             output_schema: Value::Null,
-            cli_aliases: def.cli_aliases.clone(),
             outputs: Vec::new(),
             cmd_aliases: def.cmd_aliases.clone(),
+            cli_aliases: def.cli_aliases.clone(),
             example: None,
             path_fields: vec![],
             url_fields: vec![],
         };
-        let v = parse(
+        let v = parse_with(
             &info,
             &[
                 "--path".into(),
                 "a.rs".into(),
-                "--edit".into(),
-                "old=>new".into(),
-                "--edit".into(),
-                "x=>y".into(),
-                "--replace-all".into(),
+                "--old".into(),
+                "old_fn".into(),
+                "--new".into(),
+                "new_fn".into(),
+                "--old".into(),
+                "TODO".into(),
+                "--new".into(),
+                "DONE".into(),
+                "--all".into(),
             ],
+            &|_| None,
         )
         .unwrap();
-        assert_eq!(v["edits"][0]["old"], json!("old"));
-        assert_eq!(v["edits"][1]["new"], json!("y"));
-        assert_eq!(v["edits"][0]["replace_all"], json!(true));
-        assert_eq!(v["edits"][1]["replace_all"], json!(true));
+        assert_eq!(v["old"], json!(["old_fn", "TODO"]));
+        assert_eq!(v["new"], json!(["new_fn", "DONE"]));
+        assert_eq!(v["replace_all"], json!(true));
     }
 
     #[test]
@@ -532,14 +616,14 @@ mod tests {
             capability: "write",
             input_schema: def.param_schema.clone(),
             output_schema: Value::Null,
-            cli_aliases: def.cli_aliases.clone(),
             outputs: Vec::new(),
             cmd_aliases: def.cmd_aliases.clone(),
+            cli_aliases: def.cli_aliases.clone(),
             example: None,
             path_fields: vec![],
             url_fields: vec![],
         };
-        let v = parse(
+        let v = parse_with(
             &info,
             &[
                 "--paths".into(),
@@ -547,8 +631,38 @@ mod tests {
                 "--paths".into(),
                 "c.rs".into(),
             ],
+            &|_| None,
         )
         .unwrap();
         assert_eq!(v["paths"], json!(["a.rs", "b.rs", "c.rs"]));
+    }
+
+    #[test]
+    fn parse_command_dispatches_help_and_aliases() {
+        let resolver = |token: &str| -> Option<CommandInfo> {
+            match token {
+                "fr" | "Fs_ReadFile" => Some(info()),
+                _ => None,
+            }
+        };
+        // help forwarding
+        let (cmd, _) = parse_command(&[], &resolver).unwrap();
+        assert_eq!(cmd, "Sys_Help");
+        let (cmd, params) = parse_command(&["--help".into()], &resolver).unwrap();
+        assert_eq!(cmd, "Sys_Help");
+        assert!(params.get("version").is_none());
+        let (cmd, params) = parse_command(&["-V".into()], &resolver).unwrap();
+        assert_eq!(cmd, "Sys_Help");
+        assert_eq!(params["version"], json!(true));
+        // alias + flags
+        let (cmd, params) =
+            parse_command(&["fr".into(), "-p".into(), "a.rs".into()], &resolver).unwrap();
+        assert_eq!(cmd, "Fs_ReadFile");
+        assert_eq!(params["path"], json!("a.rs"));
+        // unknown
+        assert!(matches!(
+            parse_command(&["Nope".into()], &resolver).unwrap_err(),
+            ActError::UnknownCommand(_)
+        ));
     }
 }

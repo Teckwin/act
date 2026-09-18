@@ -61,16 +61,19 @@ pub fn build_default() -> ActResult<Value> {
 
 /// A manager built from default config (no project lookup) — shared by
 /// packaging, skill installation and doc generation so generated artifacts
-/// never depend on the build machine's local configuration.
-pub fn detached_manager() -> ActResult<CommandManager> {
+/// never depend on the build machine's local configuration. Also late-binds
+/// the Sys peer so pass-through/example validation works standalone.
+pub fn detached_manager() -> ActResult<std::sync::Arc<CommandManager>> {
     let cwd = std::env::current_dir().map_err(act_kernel::ActError::Io)?;
     let config = ActConfig {
         roots: vec![cwd],
         ..Default::default()
     };
-    let manager = CommandManager::new(config)?;
+    let manager = std::sync::Arc::new(CommandManager::new(config)?);
     act_fs::register_all(&manager)?;
     act_web::register_all(&manager)?;
+    crate::sys::register_all(&manager)?;
+    crate::sys::bind_manager(manager.clone());
     Ok(manager)
 }
 

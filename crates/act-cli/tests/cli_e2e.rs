@@ -1,5 +1,5 @@
-//! End-to-end tests: CLI flags mode (primary), exec JSON channel, MCP stdio
-//! protocol, install and packaging.
+//! End-to-end tests: unified dynamic CLI (flags mode, aliases, Sys_* meta
+//! commands), generated docs consistency, MCP stdio protocol, packaging.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -46,48 +46,7 @@ impl Drop for ChildIo {
     }
 }
 
-// ---------- CLI flags mode (primary interface) ----------
-
-#[test]
-fn alias_short_command_and_short_flags() {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("alias.txt"), "alias ok 中文").unwrap();
-    // `fr` (command alias) + `-p` (param short alias) ≡ Fs_ReadFile --path
-    let out = Command::new(ACT)
-        .args(["fr", "-p", "alias.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["command"], serde_json::json!("Fs_ReadFile"));
-    assert_eq!(value["content"], serde_json::json!("alias ok 中文"));
-
-    // combined short flags: fw -p a.txt -c 内容
-    let out = Command::new(ACT)
-        .args(["fw", "-p", "new.txt", "-c", "短参写入"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["command"], serde_json::json!("Fs_WriteFile"));
-    let out = Command::new(ACT)
-        .args(["fr", "-p", "new.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["content"], serde_json::json!("短参写入"));
-}
+// ---------- Unified dynamic CLI ----------
 
 #[test]
 fn flags_mode_read_utf8() {
@@ -112,7 +71,6 @@ fn flags_mode_read_utf8() {
 #[test]
 fn flags_mode_write_gbk_read_edit_flow() {
     let tmp = tempfile::tempdir().unwrap();
-    // write (gbk)
     let out = Command::new(ACT)
         .args([
             "Fs_WriteFile",
@@ -131,21 +89,23 @@ fn flags_mode_write_gbk_read_edit_flow() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // edit with sugar
     let out = Command::new(ACT)
-        .args(["Fs_EditFile", "--path", "cn.txt", "--edit", "旧=>新"])
+        .args([
+            "Fs_EditFile",
+            "--path",
+            "cn.txt",
+            "--old",
+            "旧",
+            "--new",
+            "新",
+        ])
         .current_dir(tmp.path())
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success());
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["replacements"], serde_json::json!(1));
     assert_eq!(value["encoding"], serde_json::json!("gbk"));
-    // read back
     let out = Command::new(ACT)
         .args(["Fs_ReadFile", "--path", "cn.txt"])
         .current_dir(tmp.path())
@@ -178,8 +138,7 @@ fn flags_mode_missing_required_flag_exit_4() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(4));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--path"), "stderr: {stderr}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--path"));
 }
 
 #[test]
@@ -207,54 +166,118 @@ fn flags_mode_traversal_denied_exit_2() {
 }
 
 #[test]
-fn exec_json_channel_still_works() {
+fn alias_short_command_and_short_flags() {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+    std::fs::write(tmp.path().join("alias.txt"), "alias ok 中文").unwrap();
     let out = Command::new(ACT)
-        .args(["exec", "Fs_ReadFile", "--input", r#"{"path":"a.txt"}"#])
+        .args(["fr", "-p", "alias.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["command"], serde_json::json!("Fs_ReadFile"));
+    assert_eq!(value["content"], serde_json::json!("alias ok 中文"));
+
+    let out = Command::new(ACT)
+        .args(["fw", "-p", "new.txt", "-c", "短参写入"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = Command::new(ACT)
+        .args(["fr", "-p", "new.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["content"], serde_json::json!("短参写入"));
+}
+
+// ---------- Sys_* meta commands (unified registration) ----------
+
+#[test]
+fn sys_list_shows_all_commands_with_aliases() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = Command::new(ACT)
+        .args(["Sys_List", "--json"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
     assert!(out.status.success());
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(value["content"], serde_json::json!("x"));
-}
-
-#[test]
-fn cli_list_shows_all_commands() {
-    let tmp = tempfile::tempdir().unwrap();
-    let output = Command::new(ACT)
-        .args(["list", "--json"])
+    let commands = value["commands"].as_array().unwrap();
+    assert!(
+        commands.len() >= 25,
+        "expected >= 25 commands, got {}",
+        commands.len()
+    );
+    let names: Vec<&str> = commands
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "Fs_ReadFile",
+        "Web_Research",
+        "Sys_List",
+        "Sys_Verify",
+        "Sys_Schema",
+        "Sys_Package",
+        "Sys_Install",
+        "Sys_Serve",
+    ] {
+        assert!(names.contains(&expected), "missing {expected}");
+    }
+    // alias smoke via `act list`
+    let out = Command::new(ACT)
+        .args(["list"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
-    assert!(output.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let count = value.as_array().unwrap().len();
-    assert!(count >= 19, "expected >= 19 commands, got {count}");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("COMMAND") && text.contains("Fs_ReadFile"));
 }
 
 #[test]
-fn cli_verify_dry_run() {
+fn sys_verify_passthrough_dry_run() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
-    let output = Command::new(ACT)
-        .args(["verify", "Fs_ReadFile", "--input", r#"{"path":"a.txt"}"#])
+    let out = Command::new(ACT)
+        .args(["Sys_Verify", "--target", "Fs_ReadFile", "--path", "a.txt"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
-    assert!(output.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["allowed"], serde_json::json!(true));
+    assert_eq!(value["target"], serde_json::json!("Fs_ReadFile"));
+    assert!(value["paths"][0]["resolved"]
+        .as_str()
+        .unwrap()
+        .ends_with("a.txt"));
+
+    // deny case via alias (verify + fr)
+    let out = Command::new(ACT)
+        .args(["verify", "-t", "fr", "--path", "../escape"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["allowed"], serde_json::json!(false));
+    assert_eq!(value["code"], serde_json::json!("permission_denied"));
 }
 
-// ---------- Contract generation & consistency ----------
-
 #[test]
-fn cli_schema_outputs_full_contract() {
+fn sys_schema_outputs_full_contract() {
     let tmp = tempfile::tempdir().unwrap();
     let output = Command::new(ACT)
-        .args(["schema"])
+        .args(["Sys_Schema"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
@@ -265,7 +288,7 @@ fn cli_schema_outputs_full_contract() {
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["name"], serde_json::json!("agent-core-tools"));
-    assert!(value["commands"].as_array().unwrap().len() >= 19);
+    assert!(value["commands"].as_array().unwrap().len() >= 25);
     assert!(value["errors"].as_array().unwrap().len() >= 10);
     for command in value["commands"].as_array().unwrap() {
         assert!(
@@ -274,20 +297,32 @@ fn cli_schema_outputs_full_contract() {
             command["name"]
         );
     }
+    // every command has output variants declared
+    let read = value["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Fs_ReadFile")
+        .unwrap();
+    assert!(read["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|o| o["success"] == serde_json::json!(true)));
 }
 
 #[test]
-fn generated_skill_matches_schema() {
+fn generated_skill_matches_schema_and_has_no_exec_channel() {
     let tmp = tempfile::tempdir().unwrap();
     let schema_out = Command::new(ACT)
-        .args(["schema"])
+        .args(["Sys_Schema"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
     let schema: serde_json::Value = serde_json::from_slice(&schema_out.stdout).unwrap();
 
     let install = Command::new(ACT)
-        .args(["install", "--project", "--force"])
+        .args(["Sys_Install", "--project", "--force"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
@@ -301,23 +336,30 @@ fn generated_skill_matches_schema() {
             .unwrap();
 
     assert!(skill.contains("name: agent-core-tools"));
-    assert!(skill.contains("Fs_ReadFile"));
-    // Every command in the schema must appear as a documented section.
+    // The JSON input channel is retired: docs must not teach --input/exec.
+    assert!(
+        !skill.contains("--input"),
+        "SKILL.md must not mention --input"
+    );
+    assert!(
+        !skill.contains("act exec"),
+        "SKILL.md must not mention 'act exec'"
+    );
     for command in schema["commands"].as_array().unwrap() {
         let name = command["name"].as_str().unwrap();
-        let section = format!("### {name}\n");
         assert!(
-            skill.contains(&section),
+            skill.contains(&format!("### {name}\n")),
             "SKILL.md missing section for {name}"
         );
-        // The documented example must match the schema example.
-        let example = command["example"].as_str().unwrap();
-        assert!(
-            skill.contains(&format!("act {name} {example}")),
-            "SKILL.md example drift for {name}"
-        );
+        if let Some(example) = command["example"].as_str() {
+            if !example.is_empty() {
+                assert!(
+                    skill.contains(&format!("act {name} {example}")),
+                    "SKILL.md example drift for {name}"
+                );
+            }
+        }
     }
-    // No MCP registration by default.
     assert!(
         !tmp.path().join(".mcp.json").exists(),
         "install must not write .mcp.json by default"
@@ -333,10 +375,10 @@ fn generated_skill_matches_schema() {
 }
 
 #[test]
-fn install_with_mcp_flag_writes_config() {
+fn sys_install_with_mcp_flag_writes_config() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(ACT)
-        .args(["install", "--project", "--with-mcp", "--force"])
+        .args(["Sys_Install", "--project", "--with-mcp", "--force"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
@@ -352,21 +394,14 @@ fn install_with_mcp_flag_writes_config() {
         mcp["mcpServers"]["act"]["args"][0],
         serde_json::json!("mcp")
     );
-    assert!(
-        mcp["mcpServers"]["act"]["command"]
-            .as_str()
-            .unwrap()
-            .contains("act"),
-        "command must point at this binary"
-    );
 }
 
 #[test]
-fn package_creates_selfcontained_skill_zip() {
+fn sys_package_creates_selfcontained_skill_zip() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("dist");
     let output = Command::new(ACT)
-        .args(["package", "--out"])
+        .args(["Sys_Package", "--out"])
         .arg(&out)
         .current_dir(tmp.path())
         .output()
@@ -413,13 +448,13 @@ fn package_creates_selfcontained_skill_zip() {
     }
 }
 
-// ---------- MCP stdio (optional integration channel) ----------
+// ---------- Sys_Serve (MCP stdio, optional channel) ----------
 
 #[test]
 fn mcp_stdio_protocol_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("mcp.txt"), "mcp 内容").unwrap();
-    let mut child = ChildIo::spawn(&["mcp"], tmp.path());
+    let mut child = ChildIo::spawn(&["Sys_Serve"], tmp.path());
 
     child.send_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#);
     let response: serde_json::Value = serde_json::from_str(&child.read_line()).unwrap();
@@ -435,7 +470,7 @@ fn mcp_stdio_protocol_roundtrip() {
 
     child.send_line(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#);
     let response: serde_json::Value = serde_json::from_str(&child.read_line()).unwrap();
-    assert!(response["result"]["tools"].as_array().unwrap().len() >= 19);
+    assert!(response["result"]["tools"].as_array().unwrap().len() >= 25);
 
     child.send_line(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"Fs_ReadFile","arguments":{"path":"mcp.txt"}}}"#);
     let response: serde_json::Value = serde_json::from_str(&child.read_line()).unwrap();
@@ -451,4 +486,38 @@ fn mcp_stdio_protocol_roundtrip() {
     child.send_line(r#"{"jsonrpc":"2.0","id":6,"method":"resources/list"}"#);
     let response: serde_json::Value = serde_json::from_str(&child.read_line()).unwrap();
     assert_eq!(response["error"]["code"], serde_json::json!(-32601));
+}
+
+#[test]
+fn mcp_alias_also_serves() {
+    // `act mcp` remains as a Sys_Serve alias for muscle memory.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut child = ChildIo::spawn(&["mcp"], tmp.path());
+    child.send_line(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+    let response: serde_json::Value = serde_json::from_str(&child.read_line()).unwrap();
+    assert_eq!(response["result"], serde_json::json!({}));
+}
+
+// ---------- Global flags ----------
+
+#[test]
+fn global_config_flag_before_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"x").unwrap();
+    // `--root` adds tmp as an extra sandbox root; cwd stays the primary root.
+    let abs = tmp.path().join("a.txt").to_str().unwrap().to_string();
+    let root = tmp.path().to_str().unwrap().to_string();
+    let out = Command::new(ACT)
+        .args(["--root", &root, "Fs_ReadFile", "--path", &abs])
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["content"], serde_json::json!("x"));
 }

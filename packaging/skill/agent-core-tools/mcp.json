@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "act": {
+      "command": "<SKILL_DIR>/act",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}

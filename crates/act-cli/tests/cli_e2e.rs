@@ -220,4 +220,94 @@ fn install_project_writes_mcp_and_skill() {
     let skill = std::fs::read_to_string(&skill_path).unwrap();
     assert!(skill.contains("name: agent-core-tools"));
     assert!(skill.contains("Fs_ReadFile"));
+    // The skill directory also carries the generated contract and template.
+    let schema_path = tmp
+        .path()
+        .join(".claude/skills/agent-core-tools/schema.json");
+    assert!(schema_path.is_file());
+    let schema: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&schema_path).unwrap()).unwrap();
+    assert!(schema["commands"].as_array().unwrap().len() >= 19);
+    assert!(tmp
+        .path()
+        .join(".claude/skills/agent-core-tools/mcp.json")
+        .is_file());
+}
+
+#[test]
+fn cli_schema_outputs_full_contract() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = Command::new(ACT)
+        .args(["schema"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["name"], serde_json::json!("agent-core-tools"));
+    assert!(value["commands"].as_array().unwrap().len() >= 19);
+    assert!(value["errors"].as_array().unwrap().len() >= 10);
+    assert!(value["limits"]["max_batch"].is_u64());
+    assert!(value["envelopes"]["batch"]["applies_to"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "Fs_ReadFile"));
+}
+
+#[test]
+fn package_creates_selfcontained_skill_zip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("dist");
+    let output = Command::new(ACT)
+        .args(["package", "--out"])
+        .arg(&out)
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let staging = out.join("agent-core-tools");
+    assert!(staging.join("SKILL.md").is_file());
+    assert!(staging.join("schema.json").is_file());
+    assert!(staging.join("mcp.json").is_file());
+    let exe_name = if cfg!(windows) { "act.exe" } else { "act" };
+    assert!(staging.join(exe_name).is_file());
+
+    // Zip exists and contains the full bundle.
+    let zips: Vec<std::path::PathBuf> = std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|e| e == "zip").unwrap_or(false))
+        .collect();
+    assert_eq!(zips.len(), 1, "exactly one zip expected");
+    let name = zips[0].file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.starts_with("agent-core-tools-"), "zip name: {name}");
+
+    let file = std::fs::File::open(&zips[0]).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect();
+    for expected in [
+        "agent-core-tools/".to_string(),
+        "agent-core-tools/SKILL.md".to_string(),
+        "agent-core-tools/schema.json".to_string(),
+        "agent-core-tools/mcp.json".to_string(),
+        format!("agent-core-tools/{exe_name}"),
+    ] {
+        assert!(
+            names.contains(&expected),
+            "zip missing {expected}: {names:?}"
+        );
+    }
 }

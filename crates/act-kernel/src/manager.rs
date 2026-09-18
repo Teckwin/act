@@ -77,6 +77,16 @@ impl CommandManager {
         self.registry.read().list()
     }
 
+    /// Direct access to a command definition (tests / generators).
+    pub fn registry_def(&self, name: &str) -> Option<CommandDef> {
+        self.registry.read().get(name).cloned()
+    }
+
+    /// Resolve a canonical name OR a short alias to its definition.
+    pub fn resolve_def(&self, token: &str) -> Option<CommandDef> {
+        self.registry.read().resolve(token).cloned()
+    }
+
     /// Permission dry-run: verify without executing.
     pub async fn verify_only(
         &self,
@@ -123,6 +133,20 @@ impl CommandManager {
             .await;
         match exec_result {
             Ok(result) => {
+                // Runtime output-contract check against the declared success
+                // schema (registration-time contract; see CommandBuilder).
+                if let Err(err) = Self::validate_output(&def, &result) {
+                    self.audit_record(
+                        &mode,
+                        name,
+                        audit_paths.clone(),
+                        audit_urls.clone(),
+                        false,
+                        &err,
+                        started,
+                    );
+                    return Err(err);
+                }
                 // Output policy (overflow + summary).
                 let final_result = self
                     .output
@@ -184,6 +208,89 @@ impl CommandManager {
             error,
             duration_ms: started.elapsed().as_millis() as u64,
         });
+    }
+}
+
+impl CommandManager {
+    /// Validate a successful handler result against the command's declared
+    /// `done` output contract: required fields present + top-level types
+    /// match. Keeps handlers honest and enables mock/black-box contract tests.
+    fn validate_output(def: &CommandDef, result: &Value) -> ActResult<()> {
+        let Some(contract) = def.outputs.iter().find(|o| o.success) else {
+            return Ok(()); // legacy definitions without declared outputs
+        };
+        let command = def.name.as_str();
+        let Some(obj) = result.as_object() else {
+            return Err(ActError::output_contract(
+                command,
+                "success result must be a JSON object",
+            ));
+        };
+        let empty = Vec::new();
+        let required = contract
+            .schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .unwrap_or(&empty);
+        for field in required {
+            let Some(field) = field.as_str() else {
+                continue;
+            };
+            if !obj.contains_key(field) {
+                return Err(ActError::output_contract(
+                    command,
+                    format!("missing required output field '{field}'"),
+                ));
+            }
+        }
+        if let Some(props) = contract
+            .schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+        {
+            for (field, spec) in props {
+                let Some(value) = obj.get(field) else {
+                    continue;
+                };
+                if let Some(expected) = spec.get("type").and_then(|t| t.as_str()) {
+                    let actual = json_type_name(value);
+                    if actual != expected {
+                        return Err(ActError::output_contract(
+                            command,
+                            format!(
+                                "output field '{field}' expected type '{expected}', got '{actual}'"
+                            ),
+                        ));
+                    }
+                }
+                if let Some(constant) = spec.get("const") {
+                    if value != constant {
+                        return Err(ActError::output_contract(
+                            command,
+                            format!("output field '{field}' must equal {constant}"),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 

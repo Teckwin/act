@@ -1,9 +1,12 @@
-//! Fs_EditFile: exact string replacement preserving the file's encoding.
+//! Fs_EditFile: exact string replacement in ONE file, preserving encoding.
 
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param, Verify},
+    Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -12,11 +15,6 @@ use crate::{encoding, util};
 
 #[derive(Deserialize)]
 struct Params {
-    files: Vec<EditSpec>,
-}
-
-#[derive(Deserialize)]
-struct EditSpec {
     path: String,
     edits: Vec<EditPair>,
 }
@@ -39,35 +37,30 @@ impl CommandHandler for EditFile {
         ctx: &SandboxContext,
     ) -> ActResult<serde_json::Value> {
         let params: Params = util::parse_params(params, "Fs_EditFile")?;
-        if params.files.is_empty() {
+        if params.edits.is_empty() {
             return Err(ActError::invalid_params(
                 "Fs_EditFile",
-                "'files' must not be empty",
+                "'edits' must not be empty",
             ));
         }
-        let max_read = ctx.config.limits.max_read_bytes;
-        let mut results = Vec::with_capacity(params.files.len());
-        for spec in &params.files {
-            let item = match edit_one(ctx, spec, max_read) {
-                Ok(value) => value,
-                Err(err) => util::err_item(&spec.path, &err),
-            };
-            results.push(item);
-        }
-        Ok(util::envelope("Fs_EditFile", results))
+        edit_one(
+            ctx,
+            &params.path,
+            &params.edits,
+            ctx.config.limits.max_read_bytes,
+        )
     }
 }
 
-fn edit_one(ctx: &SandboxContext, spec: &EditSpec, max_read: u64) -> ActResult<serde_json::Value> {
-    if spec.edits.is_empty() {
-        return Err(ActError::invalid_params(
-            "Fs_EditFile",
-            "'edits' must not be empty",
-        ));
-    }
-    let (abs, _) = ctx.resolve_path(&spec.path)?;
+fn edit_one(
+    ctx: &SandboxContext,
+    input: &str,
+    edits: &[EditPair],
+    max_read: u64,
+) -> ActResult<serde_json::Value> {
+    let (abs, _) = ctx.resolve_path(input)?;
     let bytes = std::fs::read(&abs)
-        .map_err(|e| ActError::execution("Fs_EditFile", format!("read '{}': {}", spec.path, e)))?;
+        .map_err(|e| ActError::execution("Fs_EditFile", format!("read '{}': {}", input, e)))?;
     if bytes.len() as u64 > max_read {
         return Err(ActError::LimitExceeded {
             reason: format!(
@@ -83,14 +76,14 @@ fn edit_one(ctx: &SandboxContext, spec: &EditSpec, max_read: u64) -> ActResult<s
             "Fs_EditFile",
             format!(
                 "'{}' cannot be decoded cleanly ({}); refusing to edit lossy content",
-                spec.path, decoded.encoding
+                input, decoded.encoding
             ),
         ));
     }
 
     let mut text = decoded.text;
     let mut replacements = 0usize;
-    for pair in &spec.edits {
+    for pair in edits {
         if pair.old == pair.new {
             return Err(ActError::invalid_params(
                 "Fs_EditFile",
@@ -101,7 +94,7 @@ fn edit_one(ctx: &SandboxContext, spec: &EditSpec, max_read: u64) -> ActResult<s
         if count == 0 {
             return Err(ActError::execution(
                 "Fs_EditFile",
-                format!("pattern not found in '{}': {:?}", spec.path, pair.old),
+                format!("pattern not found in '{}': {:?}", input, pair.old),
             ));
         }
         if count > 1 && !pair.replace_all {
@@ -109,7 +102,7 @@ fn edit_one(ctx: &SandboxContext, spec: &EditSpec, max_read: u64) -> ActResult<s
                 "Fs_EditFile",
                 format!(
                     "pattern found {} times in '{}'; set replace_all=true or use a longer unique pattern",
-                    count, spec.path
+                    count, input
                 ),
             ));
         }
@@ -117,51 +110,25 @@ fn edit_one(ctx: &SandboxContext, spec: &EditSpec, max_read: u64) -> ActResult<s
         replacements += count;
     }
 
-    // Re-encode with the detected encoding to preserve the original format.
     let encoded = encoding::encode(&text, &decoded.encoding)?;
     util::atomic_write(&abs, &encoded)
-        .map_err(|e| ActError::execution("Fs_EditFile", format!("write '{}': {}", spec.path, e)))?;
-    Ok(util::ok_item(
-        &spec.path,
-        json!({ "replacements": replacements, "encoding": decoded.encoding }),
+        .map_err(|e| ActError::execution("Fs_EditFile", format!("write '{}': {}", input, e)))?;
+    Ok(util::flat_ok(
+        "Fs_EditFile",
+        json!({ "path": input, "replacements": replacements, "encoding": decoded.encoding }),
     ))
 }
 
 pub fn definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Fs_EditFile",
-        "Replace exact strings in files (batch). Each edit is {old,new,replace_all}; ambiguous matches are rejected; original encoding is preserved.",
-        Capability::Write,
-        json!({
-            "type": "object",
-            "properties": {
-                "files": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string" },
-                            "edits": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "old": { "type": "string" },
-                                        "new": { "type": "string" },
-                                        "replace_all": { "type": "boolean" }
-                                    },
-                                    "required": ["old", "new"]
-                                }
-                            }
-                        },
-                        "required": ["path", "edits"]
-                    }
-                }
-            },
-            "required": ["files"]
-        }),
-        vec!["/files/*/path".into()],
-        vec![],
-        Arc::new(EditFile),
-    )
+    CommandBuilder::new("Fs_EditFile", "Replace exact strings in ONE file. Multiple edits apply atomically (all must match or nothing is written); ambiguous matches rejected unless replace_all; original encoding preserved.", Capability::Write, "fe")
+        .param(Param::string("path").alias("p").required().verify(Verify::PathLike).desc("目标文件（单文件，可一次多处修改）"))
+        .param(Param::array_of_object("edits").alias("edit").required().desc("CLI 糖：重复 --edit \"old=>new\""))
+        .param(Param::boolean("replace_all").alias("all").default(json!(false)).desc("CLI 糖：应用到全部 edits"))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "path", "replacements"],
+            "properties": { "ok": { "type": "boolean" }, "command": { "const": "Fs_EditFile" },
+                "path": { "type": "string" }, "replacements": { "type": "integer" }, "encoding": { "type": "string" } }
+        }))
+        .example("--path src/main.rs --edit \"old_fn=>new_fn\" --edit \"TODO=>DONE\"")
+        .bind(Arc::new(EditFile))
 }

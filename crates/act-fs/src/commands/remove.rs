@@ -1,9 +1,12 @@
-//! Fs_RemoveFile / Fs_RemoveDir with trash-first semantics.
+//! Fs_RemoveFile / Fs_RemoveDir (single target, trash-first).
 
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param, Verify},
+    Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -12,7 +15,7 @@ use crate::{trash::Trash, util};
 
 #[derive(Deserialize)]
 struct RemoveParams {
-    paths: Vec<String>,
+    path: String,
     #[serde(default)]
     recursive: bool,
 }
@@ -27,21 +30,7 @@ impl CommandHandler for RemoveFile {
         ctx: &SandboxContext,
     ) -> ActResult<serde_json::Value> {
         let params: RemoveParams = util::parse_params(params, "Fs_RemoveFile")?;
-        if params.paths.is_empty() {
-            return Err(ActError::invalid_params(
-                "Fs_RemoveFile",
-                "'paths' must not be empty",
-            ));
-        }
-        let mut results = Vec::with_capacity(params.paths.len());
-        for input in &params.paths {
-            let item = match remove_one(ctx, input, false, false) {
-                Ok(value) => value,
-                Err(err) => util::err_item(input, &err),
-            };
-            results.push(item);
-        }
-        Ok(util::envelope("Fs_RemoveFile", results))
+        remove_one(ctx, &params.path, false, false)
     }
 }
 
@@ -55,21 +44,7 @@ impl CommandHandler for RemoveDir {
         ctx: &SandboxContext,
     ) -> ActResult<serde_json::Value> {
         let params: RemoveParams = util::parse_params(params, "Fs_RemoveDir")?;
-        if params.paths.is_empty() {
-            return Err(ActError::invalid_params(
-                "Fs_RemoveDir",
-                "'paths' must not be empty",
-            ));
-        }
-        let mut results = Vec::with_capacity(params.paths.len());
-        for input in &params.paths {
-            let item = match remove_one(ctx, input, true, params.recursive) {
-                Ok(value) => value,
-                Err(err) => util::err_item(input, &err),
-            };
-            results.push(item);
-        }
-        Ok(util::envelope("Fs_RemoveDir", results))
+        remove_one(ctx, &params.path, true, params.recursive)
     }
 }
 
@@ -79,11 +54,12 @@ fn remove_one(
     dir: bool,
     recursive: bool,
 ) -> ActResult<serde_json::Value> {
+    let command = if dir { "Fs_RemoveDir" } else { "Fs_RemoveFile" };
     let (abs, root_idx) = ctx.resolve_path(input)?;
     util::ensure_not_root(ctx, &abs)?;
 
     let meta = std::fs::symlink_metadata(&abs)
-        .map_err(|e| ActError::execution("remove", format!("cannot stat '{}': {}", input, e)))?;
+        .map_err(|e| ActError::execution(command, format!("cannot stat '{}': {}", input, e)))?;
     if dir {
         if !meta.is_dir() {
             return Err(ActError::invalid_params(
@@ -112,57 +88,48 @@ fn remove_one(
         let rel = ctx
             .rel_to_root(&trashed)
             .map(|p| p.to_string_lossy().replace('\\', "/"));
-        return Ok(util::ok_item(
-            input,
-            json!({ "deleted": true, "mode": "trash", "trash_path": rel }),
+        return Ok(util::flat_ok(
+            command,
+            json!({ "path": input, "deleted": true, "mode": "trash", "trash_path": rel }),
         ));
     }
     if dir {
-        std::fs::remove_dir_all(&abs).map_err(|e| {
-            ActError::execution("Fs_RemoveDir", format!("remove '{}': {}", input, e))
-        })?;
+        std::fs::remove_dir_all(&abs)
+            .map_err(|e| ActError::execution(command, format!("remove '{}': {}", input, e)))?;
     } else {
-        std::fs::remove_file(&abs).map_err(|e| {
-            ActError::execution("Fs_RemoveFile", format!("remove '{}': {}", input, e))
-        })?;
+        std::fs::remove_file(&abs)
+            .map_err(|e| ActError::execution(command, format!("remove '{}': {}", input, e)))?;
     }
-    Ok(util::ok_item(
-        input,
-        json!({ "deleted": true, "mode": "permanent" }),
+    Ok(util::flat_ok(
+        command,
+        json!({ "path": input, "deleted": true, "mode": "permanent" }),
     ))
 }
 
 pub fn remove_file_definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Fs_RemoveFile",
-        "Delete files (batch). Default mode moves them to .act/trash/ (recoverable); configure fs.delete_mode for permanent deletion.",
-        Capability::Write,
-        json!({
-            "type": "object",
-            "properties": { "paths": { "type": "array", "items": { "type": "string" } } },
-            "required": ["paths"]
-        }),
-        vec!["/paths/*".into()],
-        vec![],
-        Arc::new(RemoveFile),
-    )
+    CommandBuilder::new("Fs_RemoveFile", "Delete ONE file. Default mode moves it to .act/trash/ (recoverable); fs.delete_mode=permanent for hard delete.", Capability::Write, "rf")
+        .param(Param::string("path").alias("p").required().verify(Verify::PathLike).desc("目标文件（单个）"))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "path", "deleted", "mode"],
+            "properties": { "ok": { "type": "boolean" }, "command": { "const": "Fs_RemoveFile" },
+                "path": { "type": "string" }, "deleted": { "type": "boolean" },
+                "mode": { "enum": ["trash", "permanent"] },
+                "trash_path": { "type": "string", "description": "mode=trash 时返回，可 Fs_ReadFile 读回" } }
+        }))
+        .example("--path tmp/old.log")
+        .bind(Arc::new(RemoveFile))
 }
 
 pub fn remove_dir_definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Fs_RemoveDir",
-        "Delete directories (batch). Non-empty directories require recursive=true. Sandbox roots themselves can never be removed. Default mode is trash.",
-        Capability::Write,
-        json!({
-            "type": "object",
-            "properties": {
-                "paths": { "type": "array", "items": { "type": "string" } },
-                "recursive": { "type": "boolean", "description": "Required for non-empty directories" }
-            },
-            "required": ["paths"]
-        }),
-        vec!["/paths/*".into()],
-        vec![],
-        Arc::new(RemoveDir),
-    )
+    CommandBuilder::new("Fs_RemoveDir", "Delete ONE directory. Non-empty requires recursive=true; sandbox roots can never be removed; trash-first by default.", Capability::Write, "rd")
+        .param(Param::string("path").alias("p").required().verify(Verify::PathLike).desc("目标目录（单个）"))
+        .param(Param::boolean("recursive").alias("R").default(json!(false)).desc("非空目录必须显式传 true"))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "path", "deleted", "mode"],
+            "properties": { "ok": { "type": "boolean" }, "command": { "const": "Fs_RemoveDir" },
+                "path": { "type": "string" }, "deleted": { "type": "boolean" },
+                "mode": { "enum": ["trash", "permanent"] }, "trash_path": { "type": "string" } }
+        }))
+        .example("--path build/dist --recursive")
+        .bind(Arc::new(RemoveDir))
 }

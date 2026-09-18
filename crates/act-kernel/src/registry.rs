@@ -10,6 +10,35 @@ use crate::context::SandboxContext;
 use crate::error::{ActError, ActResult};
 use crate::name::{CommandName, BUILTIN_DOMAINS};
 
+/// Parameter verification semantics: PathLike/UrlLike params are routed
+/// through the corresponding guard (path sandbox / URL policy) and are the
+/// source for path_fields/url_fields derivation in the builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum Verify {
+    PathLike,
+    UrlLike,
+}
+
+impl Verify {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Verify::PathLike => "PathLike",
+            Verify::UrlLike => "UrlLike",
+        }
+    }
+}
+
+/// One declared output variant of a command: the success contract
+/// (variant="done", success=true) or the envelope emitted for a specific
+/// kernel error code (variant="failed_<code>", success=false).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OutputSpec {
+    pub variant: String,
+    pub success: bool,
+    pub schema: Value,
+}
+
 /// Capability class of a command; gates per-mode switches and protection level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
@@ -45,8 +74,20 @@ pub struct CommandDef {
     pub name: CommandName,
     pub description: String,
     pub capability: Capability,
-    /// JSON schema of the parameters (informational, exposed via MCP).
+    /// JSON schema of the parameters. Single source of truth: the CLI flag
+    /// parser, the generated SKILL.md and schema.json all derive from it.
     pub param_schema: Value,
+    /// Success output contract (the `done` variant schema).
+    pub output_schema: Value,
+    /// Declared output variants: `done` (success) + `failed_<code>` envelopes.
+    pub outputs: Vec<OutputSpec>,
+    /// Short command alias, e.g. `fr` for Fs_ReadFile.
+    pub cmd_aliases: Vec<String>,
+    /// CLI flag aliases: (flag name, canonical param name), e.g. ("p", "path").
+    pub cli_aliases: Vec<(String, String)>,
+    /// Canonical CLI usage example (flags only). Validated in tests so docs
+    /// can never drift from the parser.
+    pub example: Option<String>,
     /// JSON-pointer patterns locating path fields, e.g. `/paths/*`.
     pub path_fields: Vec<String>,
     /// JSON-pointer patterns locating url fields, e.g. `/urls/*`.
@@ -69,6 +110,11 @@ impl CommandDef {
             description: description.into(),
             capability,
             param_schema,
+            output_schema: Value::Null,
+            outputs: Vec::new(),
+            cmd_aliases: Vec::new(),
+            cli_aliases: Vec::new(),
+            example: None,
             path_fields,
             url_fields,
             handler,
@@ -76,13 +122,19 @@ impl CommandDef {
     }
 }
 
-/// Serializable command metadata for `act list` and MCP `tools/list`.
+/// Serializable command metadata for `act list`, MCP `tools/list` and the
+/// skill generator.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CommandInfo {
     pub name: String,
     pub description: String,
     pub capability: &'static str,
     pub input_schema: Value,
+    pub output_schema: Value,
+    pub outputs: Vec<OutputSpec>,
+    pub cmd_aliases: Vec<String>,
+    pub cli_aliases: Vec<(String, String)>,
+    pub example: Option<String>,
     pub path_fields: Vec<String>,
     pub url_fields: Vec<String>,
 }
@@ -120,12 +172,31 @@ impl CommandRegistry {
                 existing: def.name.as_str().to_string(),
             });
         }
+        // Command aliases must not collide with any registered name/alias.
+        for alias in &def.cmd_aliases {
+            crate::builder::validate_alias(alias)?;
+            if self.resolve(alias).is_some() {
+                return Err(ActError::DuplicateCommand {
+                    existing: format!("alias '{alias}'"),
+                });
+            }
+        }
         self.defs.insert(def.name.as_str().to_string(), def);
         Ok(())
     }
 
     pub fn get(&self, name: &str) -> Option<&CommandDef> {
         self.defs.get(name)
+    }
+
+    /// Resolve a canonical name OR a short alias (`fr` → Fs_ReadFile).
+    pub fn resolve(&self, token: &str) -> Option<&CommandDef> {
+        if let Some(def) = self.defs.get(token) {
+            return Some(def);
+        }
+        self.defs
+            .values()
+            .find(|def| def.cmd_aliases.iter().any(|a| a == token))
     }
 
     pub fn len(&self) -> usize {
@@ -146,6 +217,11 @@ impl CommandRegistry {
                 description: def.description.clone(),
                 capability: def.capability.label(),
                 input_schema: def.param_schema.clone(),
+                output_schema: def.output_schema.clone(),
+                outputs: def.outputs.clone(),
+                cmd_aliases: def.cmd_aliases.clone(),
+                cli_aliases: def.cli_aliases.clone(),
+                example: def.example.clone(),
                 path_fields: def.path_fields.clone(),
                 url_fields: def.url_fields.clone(),
             })

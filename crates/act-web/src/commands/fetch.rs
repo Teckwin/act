@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param, Verify},
+    Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::Deserialize;
@@ -154,22 +157,24 @@ async fn fetch_one(
 }
 
 pub fn definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Web_Fetch",
-        "Fetch URLs in parallel and convert HTML to clean Markdown (default), text, JSON or raw HTML. Every URL and redirect hop is policy-checked (SSRF-safe).",
-        Capability::Net,
-        json!({
-            "type": "object",
-            "properties": {
-                "urls": { "type": "array", "items": { "type": "string" } },
-                "format": { "type": "string", "enum": ["markdown", "text", "json", "html"], "default": "markdown" },
-                "max_bytes": { "type": "integer" },
-                "timeout_ms": { "type": "integer" }
-            },
-            "required": ["urls"]
-        }),
-        vec![],
-        vec!["/urls/*".into()],
-        Arc::new(WebFetch),
-    )
+    CommandBuilder::new("Web_Fetch", "Fetch URLs in parallel and convert HTML to clean Markdown (default), text, JSON or raw HTML. Every URL and redirect hop is policy-checked (SSRF-safe).", Capability::Net, "wf")
+        .param(Param::array_of_string("urls").alias("u").required().verify(Verify::UrlLike).desc("并行抓取（场景支撑）；逐条隔离失败"))
+        .param(Param::string("format").alias("f").enum_values(&["markdown", "text", "json", "html"]).default(json!("markdown")))
+        .param(Param::integer("max_bytes").alias("mb").min(1.0).max(2097152.0))
+        .param(Param::integer("timeout_ms").alias("t").min(1.0).max(300000.0))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "results", "summary"],
+            "properties": { "ok": { "type": "boolean", "description": "至少一项成功即 true" },
+                "command": { "const": "Web_Fetch" },
+                "results": { "type": "array", "items": { "type": "object", "properties": {
+                    "url": { "type": "string" }, "ok": { "type": "boolean" },
+                    "final_url": { "type": "string", "description": "跟随重定向后的最终地址" },
+                    "status": { "type": "integer" }, "content_type": { "type": "string" },
+                    "bytes": { "type": "integer" }, "truncated": { "type": "boolean" },
+                    "redirects": { "type": "array", "items": { "type": "string" } },
+                    "content": { "type": "string", "description": "默认 markdown；text/json/html 可选" } } } },
+                "summary": { "type": "object", "properties": { "succeeded": { "type": "integer" }, "failed": { "type": "integer" } } } }
+        }))
+        .example("--urls https://example.com/a,https://example.com/b --format markdown")
+        .bind(Arc::new(WebFetch))
 }

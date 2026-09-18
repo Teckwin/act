@@ -6,6 +6,7 @@
 //! enforces the five security guards on every call.
 
 pub mod audit;
+pub mod builder;
 pub mod config;
 pub mod context;
 pub mod error;
@@ -18,8 +19,9 @@ pub mod param;
 pub mod registry;
 pub mod summarize;
 
+pub use builder::{CommandBuilder, Param, ParamType};
 pub use config::ActConfig;
 pub use context::{InvokeMode, SandboxContext};
 pub use error::{ActError, ActResult};
 pub use manager::CommandManager;
-pub use registry::{Capability, CommandDef, CommandHandler, CommandInfo};
+pub use registry::{Capability, CommandDef, CommandHandler, CommandInfo, OutputSpec, Verify};

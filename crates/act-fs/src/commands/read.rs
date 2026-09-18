@@ -1,9 +1,12 @@
-//! Fs_ReadFile: batch read with encoding detection and line slicing.
+//! Fs_ReadFile: single-file read with encoding detection and line slicing.
 
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param, Verify},
+    Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -12,8 +15,10 @@ use crate::{encoding, util};
 
 #[derive(Deserialize)]
 struct Params {
-    paths: Vec<String>,
+    path: String,
+    #[serde(default)]
     offset: Option<u64>,
+    #[serde(default)]
     limit: Option<u64>,
 }
 
@@ -27,27 +32,17 @@ impl CommandHandler for ReadFile {
         ctx: &SandboxContext,
     ) -> ActResult<serde_json::Value> {
         let params: Params = util::parse_params(params, "Fs_ReadFile")?;
-        if params.paths.is_empty() {
-            return Err(ActError::invalid_params(
-                "Fs_ReadFile",
-                "'paths' must not be empty",
-            ));
-        }
-        let max_read = ctx.config.limits.max_read_bytes;
-        let mut results = Vec::with_capacity(params.paths.len());
-
-        for input in &params.paths {
-            let item = match read_one(ctx, input, params.offset, params.limit, max_read) {
-                Ok(value) => value,
-                Err(err) => util::err_item(input, &err),
-            };
-            results.push(item);
-        }
-        Ok(util::envelope("Fs_ReadFile", results))
+        read_one(
+            ctx,
+            &params.path,
+            params.offset,
+            params.limit,
+            ctx.config.limits.max_read_bytes,
+        )
     }
 }
 
-fn read_one(
+pub fn read_one(
     ctx: &SandboxContext,
     input: &str,
     offset: Option<u64>,
@@ -96,9 +91,10 @@ fn read_one(
         }
     };
 
-    Ok(util::ok_item(
-        input,
+    Ok(util::flat_ok(
+        "Fs_ReadFile",
         json!({
+            "path": input,
             "encoding": decoded.encoding,
             "lossy": decoded.lossy,
             "size": meta.len(),
@@ -111,21 +107,33 @@ fn read_one(
 }
 
 pub fn definition() -> ActResult<CommandDef> {
-    CommandDef::new(
+    CommandBuilder::new(
         "Fs_ReadFile",
-        "Read one or more text files with automatic encoding detection (UTF-8/BOM/UTF-16/fallback). Supports line offset/limit slicing.",
+        "Read one text file with automatic encoding detection (UTF-8/BOM/UTF-16/fallback); optional line slicing.",
         Capability::Read,
-        json!({
-            "type": "object",
-            "properties": {
-                "paths": { "type": "array", "items": { "type": "string" }, "description": "File paths (batch)" },
-                "offset": { "type": "integer", "description": "0-based start line" },
-                "limit": { "type": "integer", "description": "Max lines to return" }
-            },
-            "required": ["paths"]
-        }),
-        vec!["/paths/*".into()],
-        vec![],
-        Arc::new(ReadFile),
+        "fr",
     )
+    .param(Param::string("path").alias("p").required().verify(Verify::PathLike).desc("File path (single file)"))
+    .param(Param::integer("offset").alias("o").min(0.0).desc("0-based start line"))
+    .param(Param::integer("limit").alias("l").min(1.0).desc("Max lines to return"))
+    .output_done(json!({
+        "type": "object",
+        "required": ["ok", "command", "path", "content"],
+        "properties": {
+            "ok": { "type": "boolean" }, "command": { "const": "Fs_ReadFile" },
+            "path": { "type": "string" },
+            "encoding": { "type": "string", "description": "detected: utf-8 | utf-8-bom | utf-16le | utf-16be | gbk …" },
+            "lossy": { "type": "boolean", "description": "true = 不可逆替换过" },
+            "size": { "type": "integer" }, "total_lines": { "type": "integer" },
+            "line_start": { "type": "integer" }, "line_end": { "type": "integer" },
+            "content": { "type": "string" }
+        }
+    }))
+    .output_fail("permission_denied", json!({
+        "type": "object",
+        "description": "CLI: error[permission_denied] exit=2; MCP: isError=true {code,message}",
+        "properties": { "code": { "const": "permission_denied" }, "message": { "type": "string" } }
+    }))
+    .example("--path src/main.rs --offset 0 --limit 200")
+    .bind(Arc::new(ReadFile))
 }

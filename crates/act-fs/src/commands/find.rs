@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param, Verify},
+    Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use globset::{Glob, GlobSetBuilder};
 use serde::Deserialize;
@@ -127,24 +130,22 @@ impl CommandHandler for FindFile {
 }
 
 pub fn definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Fs_FindFile",
-        "Find files by glob patterns under a root (batch patterns, OR semantics). Gitignore-aware by default; patterns match the relative path or the file name.",
-        Capability::Read,
-        json!({
-            "type": "object",
-            "properties": {
+    CommandBuilder::new("Fs_FindFile", "Find files by glob patterns under a root (patterns are OR-ed; gitignore-aware by default; matches relative path or file name).", Capability::Read, "find")
+        .param(Param::string("root").alias("r").required().verify(Verify::PathLike))
+        .param(Param::array_of_string("patterns").alias("pattern").required().desc("globset 语法；同时匹配文件名与相对路径"))
+        .param(Param::integer("max_depth").alias("d").alias("depth").min(1.0).max(64.0))
+        .param(Param::boolean("include_hidden").alias("h").alias("hidden").default(json!(false)))
+        .param(Param::boolean("respect_gitignore").alias("no-gitignore").default(json!(true)).desc("CLI 否定形：--no-gitignore"))
+        .param(Param::integer("max_results").alias("m").alias("max").min(1.0).max(500.0))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "root", "matches", "count"],
+            "properties": { "ok": { "type": "boolean" }, "command": { "const": "Fs_FindFile" },
                 "root": { "type": "string" },
-                "patterns": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"*.rs\", \"docs/**/*.md\"]" },
-                "max_depth": { "type": "integer" },
-                "include_hidden": { "type": "boolean", "default": false },
-                "respect_gitignore": { "type": "boolean", "default": true },
-                "max_results": { "type": "integer" }
-            },
-            "required": ["root", "patterns"]
-        }),
-        vec!["/root".into()],
-        vec![],
-        Arc::new(FindFile),
-    )
+                "matches": { "type": "array", "items": { "type": "object", "properties": {
+                    "path": { "type": "string", "description": "root+相对路径，可直接回传其他命令" },
+                    "is_dir": { "type": "boolean" }, "size": { "type": "integer" } } } },
+                "count": { "type": "integer" }, "truncated": { "type": "boolean" } }
+        }))
+        .example("--root crates --pattern *.rs --pattern *.toml --max 50")
+        .bind(Arc::new(FindFile))
 }

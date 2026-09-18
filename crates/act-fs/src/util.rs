@@ -12,7 +12,7 @@ pub fn parse_params<T: DeserializeOwned>(params: Value, command: &str) -> ActRes
     serde_json::from_value(params).map_err(|e| ActError::invalid_params(command, e.to_string()))
 }
 
-/// Standard per-item success payload.
+/// Standard per-item success payload (batch commands only).
 pub fn ok_item(path: &str, extra: Value) -> Value {
     let mut item = serde_json::json!({ "path": path, "ok": true });
     if let (Some(base), Some(ext)) = (item.as_object_mut(), extra.as_object()) {
@@ -33,7 +33,8 @@ pub fn err_item(path: &str, err: &ActError) -> Value {
     })
 }
 
-/// Wrap per-item results into the common envelope.
+/// Wrap per-item results into the common envelope (batch commands only:
+/// Fs_Create, Fs_Mkdir, Web_Fetch).
 pub fn envelope(command: &str, results: Vec<Value>) -> Value {
     let succeeded = results
         .iter()
@@ -46,6 +47,18 @@ pub fn envelope(command: &str, results: Vec<Value>) -> Value {
         "results": results,
         "summary": { "succeeded": succeeded, "failed": failed },
     })
+}
+
+/// Flat success payload for single-target commands:
+/// `{"ok":true,"command":..., <fields>}`.
+pub fn flat_ok(command: &str, fields: Value) -> Value {
+    let mut out = serde_json::json!({ "ok": true, "command": command });
+    if let (Some(base), Some(ext)) = (out.as_object_mut(), fields.as_object()) {
+        for (k, v) in ext {
+            base.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 /// Atomic write: temp file in the same directory, then rename.

@@ -1,9 +1,9 @@
 //! `act package`: stage the self-contained skill bundle and zip it.
 //!
 //! Layout produced under `<out>/agent-core-tools/`:
-//!   SKILL.md    agent-facing command contract
+//!   SKILL.md    compiled agent contract (generated from this binary)
 //!   schema.json machine-readable contract (generated from this binary)
-//!   mcp.json    MCP config template (<SKILL_DIR> placeholder)
+//!   mcp.json    optional MCP template (<SKILL_DIR> placeholder)
 //!   act|act.exe the kernel binary (copied from the running executable)
 //! plus `<out>/agent-core-tools-<version>-<target>.zip`.
 
@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 
 use act_kernel::error::{ActError, ActResult};
 
-const SKILL_MD: &str = include_str!("../../../packaging/skill/agent-core-tools/SKILL.md");
 const MCP_JSON: &str = include_str!("../../../packaging/skill/agent-core-tools/mcp.json");
 
 pub fn run(out_dir: &Path) -> ActResult<PathBuf> {
@@ -22,7 +21,10 @@ pub fn run(out_dir: &Path) -> ActResult<PathBuf> {
     }
     std::fs::create_dir_all(&staging).map_err(ActError::Io)?;
 
-    std::fs::write(staging.join("SKILL.md"), SKILL_MD).map_err(ActError::Io)?;
+    // SKILL.md is compiled from command metadata — never hand-written.
+    let manager = crate::schema::detached_manager()?;
+    let skill_md = crate::gen::skill_markdown(&manager);
+    std::fs::write(staging.join("SKILL.md"), skill_md).map_err(ActError::Io)?;
     let schema = crate::schema::build_default()?;
     let schema_pretty = serde_json::to_vec_pretty(&schema)
         .map_err(|e| ActError::Other(format!("serialize schema: {e}")))?;

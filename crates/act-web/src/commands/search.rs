@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param},
+    Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::Deserialize;
@@ -134,21 +137,21 @@ pub async fn run_search(
 }
 
 pub fn definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Web_Search",
-        "Search the web across multiple engines in parallel (DuckDuckGo/Bing without keys; Google/Brave/SearXNG optional) and merge results with Reciprocal Rank Fusion dedupe.",
-        Capability::Net,
-        json!({
-            "type": "object",
-            "properties": {
-                "queries": { "type": "array", "items": { "type": "string" } },
-                "engines": { "type": "array", "items": { "type": "string" }, "description": "Subset of available engines" },
-                "max_results": { "type": "integer", "default": 10 }
-            },
-            "required": ["queries"]
-        }),
-        vec!["/queries/*".into()],
-        vec![],
-        Arc::new(WebSearch),
-    )
+    CommandBuilder::new("Web_Search", "Search the web across multiple engines in parallel (DuckDuckGo/Bing without keys; Google/Brave/SearXNG optional) and merge results with Reciprocal Rank Fusion dedupe.", Capability::Net, "ws")
+        .param(Param::array_of_string("queries").alias("q").required().desc("多查询并行（场景支撑）"))
+        .param(Param::array_of_string("engines").alias("e").alias("engine").desc("可用引擎子集；不可用引擎报 invalid_params"))
+        .param(Param::integer("max_results").alias("m").alias("max").min(1.0).max(500.0).default(json!(10)))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "queries"],
+            "properties": { "ok": { "type": "boolean" }, "command": { "const": "Web_Search" },
+                "queries": { "type": "array", "items": { "type": "object", "properties": {
+                    "query": { "type": "string" },
+                    "results": { "type": "array", "items": { "type": "object", "properties": {
+                        "rank": { "type": "integer" }, "title": { "type": "string" }, "url": { "type": "string" },
+                        "snippet": { "type": "string" }, "engines": { "type": "array", "items": { "type": "string" } }, "score": { "type": "number" } } } },
+                    "count": { "type": "integer" }, "engines_used": { "type": "array", "items": { "type": "string" } },
+                    "warnings": { "type": "array", "items": { "type": "object" }, "description": "单引擎失败降级，不影响整体" } } } } }
+        }))
+        .example("--queries \"rust mcp server\" --engines duckduckgo,bing --max 10")
+        .bind(Arc::new(WebSearch))
 }

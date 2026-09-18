@@ -177,8 +177,7 @@ impl PathGuard {
                 }
             }
         }
-        let (root_idx, lexical_rel) =
-            root_match.ok_or_else(|| deny(&normalized, &self.roots))?;
+        let (root_idx, lexical_rel) = root_match.ok_or_else(|| deny(&normalized, &self.roots))?;
 
         // Incremental canonicalization with symlink re-validation.
         let root = self.roots[root_idx].clone();

@@ -181,6 +181,24 @@ async fn permanent_mode_configurable() {
     assert!(!tmp.path().join("p.txt").exists());
 }
 
+#[tokio::test]
+async fn trash_entry_can_be_read_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("rb.txt"), "recoverable").unwrap();
+    let m = manager_in(tmp.path());
+    let out = exec_cmd(&m, "Fs_RemoveFile", json!({"paths": ["rb.txt"]}))
+        .await
+        .unwrap();
+    let trash = out["results"][0]["trash_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // .act/** is protected, but overflow/trash entries stay readable.
+    let out = exec(&m, json!({"paths": [trash]})).await.unwrap();
+    assert_eq!(out["results"][0]["ok"], json!(true));
+    assert_eq!(out["results"][0]["content"], json!("recoverable"));
+}
+
 // ---------- Encoding ----------
 
 #[tokio::test]

@@ -101,7 +101,8 @@ jobs:
         shell: bash
         run: |
           ASSET="agent-core-tools-$VERSION-$TARGET.zip"
-          (cd dist && zip -r "../$ASSET" agent-core-tools)
+          (cd dist && zip -r "$ASSET" agent-core-tools)
+          test -f "dist/$ASSET"
           echo "ASSET=dist/$ASSET" >> "$GITHUB_ENV"
 
       - name: Zip (windows)

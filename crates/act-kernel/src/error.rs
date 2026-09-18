@@ -32,6 +32,9 @@ pub enum ActError {
     #[error("execution of {command} failed: {detail}")]
     Execution { command: String, detail: String },
 
+    #[error("output contract violation in {command}: {detail}")]
+    OutputContract { command: String, detail: String },
+
     #[error("command timed out after {0:?}")]
     Timeout(std::time::Duration),
 
@@ -58,6 +61,7 @@ impl ActError {
             ActError::LimitExceeded { .. } => "limit_exceeded",
             ActError::CapabilityDisabled { .. } => "capability_disabled",
             ActError::Execution { .. } => "execution_failed",
+            ActError::OutputContract { .. } => "contract_violation",
             ActError::Timeout(_) => "timeout",
             ActError::Config(_) => "config_error",
             ActError::Io(_) => "io_error",
@@ -76,7 +80,10 @@ impl ActError {
             ActError::PermissionDenied { .. }
             | ActError::LimitExceeded { .. }
             | ActError::CapabilityDisabled { .. } => 2,
-            ActError::Execution { .. } | ActError::Io(_) | ActError::Other(_) => 5,
+            ActError::Execution { .. }
+            | ActError::OutputContract { .. }
+            | ActError::Io(_)
+            | ActError::Other(_) => 5,
             ActError::Timeout(_) => 6,
             ActError::Config(_) => 7,
         }
@@ -98,6 +105,13 @@ impl ActError {
 
     pub fn execution(command: impl Into<String>, detail: impl Into<String>) -> Self {
         ActError::Execution {
+            command: command.into(),
+            detail: detail.into(),
+        }
+    }
+
+    pub fn output_contract(command: impl Into<String>, detail: impl Into<String>) -> Self {
+        ActError::OutputContract {
             command: command.into(),
             detail: detail.into(),
         }

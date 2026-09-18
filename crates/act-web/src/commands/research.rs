@@ -5,7 +5,10 @@
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{summarize, Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param},
+    summarize, Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::Deserialize;
@@ -212,22 +215,21 @@ pub async fn run_research(
 }
 
 pub fn definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Web_Research",
-        "Deep research on a topic: multi-engine search, source ranking, parallel fetch, extractive per-source summaries and a cited Markdown report. Heuristic only (no LLM required).",
-        Capability::Net,
-        json!({
-            "type": "object",
-            "properties": {
-                "topic": { "type": "string" },
-                "max_sources": { "type": "integer", "default": 8, "maximum": 20 },
-                "max_results": { "type": "integer", "default": 15 },
-                "engines": { "type": "array", "items": { "type": "string" } }
-            },
-            "required": ["topic"]
-        }),
-        vec![],
-        vec![],
-        Arc::new(WebResearch),
-    )
+    CommandBuilder::new("Web_Research", "Deep research on a topic: multi-engine search, source ranking, parallel fetch, extractive per-source summaries and a cited Markdown report. Heuristic only (no LLM required).", Capability::Net, "wr")
+        .param(Param::string("topic").alias("t").required())
+        .param(Param::integer("max_sources").alias("s").alias("sources").min(1.0).max(20.0).default(json!(8)))
+        .param(Param::integer("max_results").alias("m").alias("max").min(1.0).default(json!(15)))
+        .param(Param::array_of_string("engines").alias("e").alias("engine"))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "topic", "report", "sources"],
+            "properties": { "ok": { "type": "boolean" }, "command": { "const": "Web_Research" },
+                "topic": { "type": "string" }, "report": { "type": "string", "description": "带编号引用的 Markdown 报告" },
+                "sources": { "type": "array", "items": { "type": "object", "properties": {
+                    "n": { "type": "integer" }, "title": { "type": "string" }, "url": { "type": "string" },
+                    "final_url": { "type": "string" }, "bytes": { "type": "integer" },
+                    "summary": { "type": "string", "description": "≤400 字符抽取式摘要" } } } },
+                "failed": { "type": "array", "items": { "type": "object" }, "description": "抓取失败的源，不影响报告生成" } }
+        }))
+        .example("--topic \"mcp protocol adoption\" --sources 8")
+        .bind(Arc::new(WebResearch))
 }

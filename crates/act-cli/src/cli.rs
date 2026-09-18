@@ -58,9 +58,9 @@ pub enum Command {
         #[arg(long, default_value = "dist")]
         out: PathBuf,
     },
-    /// Install the skill + MCP configuration.
+    /// Install the skill files (SKILL.md/schema.json/mcp.json template).
     Install {
-        /// Install into the current project (.mcp.json + .claude/skills/).
+        /// Install into the current project (.claude/skills/).
         #[arg(long)]
         project: bool,
         /// Install the skill into the user directory (~/.claude/skills/).
@@ -69,6 +69,9 @@ pub enum Command {
         /// Executable path to register in .mcp.json (default: this binary).
         #[arg(long)]
         exe: Option<String>,
+        /// Also write .mcp.json registering this binary as an MCP server (project scope).
+        #[arg(long)]
+        with_mcp: bool,
         /// Overwrite an existing .mcp.json entry.
         #[arg(long)]
         force: bool,
@@ -76,7 +79,16 @@ pub enum Command {
 }
 
 pub fn build_manager(cli: &Cli) -> ActResult<CommandManager> {
-    if let Some(path) = &cli.config {
+    build_manager_with(cli.config.clone(), cli.root.clone())
+}
+
+/// Build the manager from explicit config/roots (config file defaults to the
+/// `ACT_CONFIG` env var or `<cwd>/act.config.json`).
+pub fn build_manager_with(
+    config: Option<PathBuf>,
+    roots: Vec<PathBuf>,
+) -> ActResult<CommandManager> {
+    if let Some(path) = &config {
         let abs = if path.is_absolute() {
             path.clone()
         } else {
@@ -86,7 +98,7 @@ pub fn build_manager(cli: &Cli) -> ActResult<CommandManager> {
     }
     let cwd = std::env::current_dir().map_err(ActError::Io)?;
     let mut config = ActConfig::load(&cwd)?;
-    for root in &cli.root {
+    for root in &roots {
         let abs = if root.is_absolute() {
             root.clone()
         } else {
@@ -183,8 +195,9 @@ pub async fn run(cli: Cli) -> ActResult<()> {
             project,
             user,
             exe,
+            with_mcp,
             force,
-        } => crate::install::run(project, user, exe, force),
+        } => crate::install::run(project, user, exe, with_mcp, force),
     }
 }
 
@@ -207,4 +220,25 @@ pub fn print_json(value: &serde_json::Value) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("serialize output failed: {e}"),
     }
+}
+
+/// Execute a dynamic command: `act <Command> --flags ...`.
+/// The first token is a registered command name (Domain_Action); the rest are
+/// schema-driven flags parsed by `flags::parse`.
+pub async fn run_dynamic(name: &str, args: &[String]) -> ActResult<()> {
+    let manager = build_manager_with(None, Vec::new())?;
+    // Canonical command name or short alias (fr → Fs_ReadFile).
+    let def = manager
+        .resolve_def(name)
+        .ok_or_else(|| ActError::UnknownCommand(name.to_string()))?;
+    let canonical = def.name.as_str().to_string();
+    let infos = manager.list();
+    let info = infos
+        .iter()
+        .find(|c| c.name == canonical)
+        .ok_or_else(|| ActError::UnknownCommand(canonical.clone()))?;
+    let params = crate::flags::parse(info, args)?;
+    let result = manager.execute(&canonical, params, InvokeMode::Cli).await?;
+    print_json(&result);
+    Ok(())
 }

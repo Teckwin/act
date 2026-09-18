@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use act_kernel::error::{ActError, ActResult};
-use act_kernel::{Capability, CommandDef, CommandHandler, SandboxContext};
+use act_kernel::{
+    builder::{CommandBuilder, Param, Verify},
+    Capability, CommandDef, CommandHandler, SandboxContext,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -170,25 +173,25 @@ impl CommandHandler for GrepFile {
 }
 
 pub fn definition() -> ActResult<CommandDef> {
-    CommandDef::new(
-        "Fs_GrepFile",
-        "Regex content search under a root. Each file is decoded (UTF-8/BOM/UTF-16/fallback) before matching; gitignore-aware; optional glob filter and context lines.",
-        Capability::Read,
-        json!({
-            "type": "object",
-            "properties": {
-                "root": { "type": "string" },
-                "pattern": { "type": "string", "description": "Rust regex" },
-                "globs": { "type": "array", "items": { "type": "string" } },
-                "include_hidden": { "type": "boolean", "default": false },
-                "respect_gitignore": { "type": "boolean", "default": true },
-                "max_results": { "type": "integer", "description": "Cap on total matched lines" },
-                "context_lines": { "type": "integer", "minimum": 0, "maximum": 10, "default": 0 }
-            },
-            "required": ["root", "pattern"]
-        }),
-        vec!["/root".into()],
-        vec![],
-        Arc::new(GrepFile),
-    )
+    CommandBuilder::new("Fs_GrepFile", "Regex content search under a root. Each file is decoded (UTF-8/BOM/UTF-16/fallback) before matching; gitignore-aware; optional glob filter and context lines.", Capability::Read, "grep")
+        .param(Param::string("root").alias("r").required().verify(Verify::PathLike))
+        .param(Param::string("pattern").alias("e").required().desc("Rust regex（不支持 lookahead/backreference）"))
+        .param(Param::array_of_string("globs").alias("g").alias("glob").desc("文件过滤 glob，可重复/逗号分隔"))
+        .param(Param::boolean("include_hidden").alias("h").alias("hidden").default(json!(false)))
+        .param(Param::boolean("respect_gitignore").alias("no-gitignore").default(json!(true)).desc("CLI 否定形：--no-gitignore"))
+        .param(Param::integer("max_results").alias("m").alias("max").min(1.0).max(500.0).desc("匹配行总数上限"))
+        .param(Param::integer("context_lines").alias("c").alias("context").min(0.0).max(10.0).default(json!(0)))
+        .output_done(json!({
+            "type": "object", "required": ["ok", "command", "root", "pattern", "files", "file_count"],
+            "properties": { "ok": { "type": "boolean" }, "command": { "const": "Fs_GrepFile" },
+                "root": { "type": "string" }, "pattern": { "type": "string" },
+                "files": { "type": "array", "items": { "type": "object", "properties": {
+                    "path": { "type": "string" }, "encoding": { "type": "string" }, "match_count": { "type": "integer" },
+                    "matches": { "type": "array", "items": { "type": "object", "properties": {
+                        "line": { "type": "integer", "description": "1-based 行号" }, "text": { "type": "string" },
+                        "context": { "type": "string", "description": "context_lines>0 时非 null，> 标记命中行" } } } } } } },
+                "file_count": { "type": "integer" }, "match_lines": { "type": "integer" }, "truncated": { "type": "boolean" } }
+        }))
+        .example("--root src --pattern \"TODO|FIXME\" --glob *.rs --context 2")
+        .bind(Arc::new(GrepFile))
 }

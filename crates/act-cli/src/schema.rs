@@ -17,6 +17,11 @@ pub fn build(manager: &CommandManager) -> Value {
             "description": c.description,
             "capability": c.capability,
             "inputSchema": c.input_schema,
+            "outputSchema": c.output_schema,
+            "cmdAliases": c.cmd_aliases,
+            "cliAliases": c.cli_aliases,
+            "outputs": c.outputs,
+            "example": c.example,
             "pathFields": c.path_fields,
             "urlFields": c.url_fields,
         })).collect::<Vec<_>>(),
@@ -36,11 +41,8 @@ pub fn build(manager: &CommandManager) -> Value {
             "max_summary_chars": config.output.compression.max_summary_chars
         },
         "envelopes": {
-            "batch": {
-                "shape": { "ok": "bool", "command": "string", "results": "item[]", "summary": { "succeeded": "int", "failed": "int" } },
-                "applies_to": ["Fs_ReadFile", "Fs_WriteFile", "Fs_AppendFile", "Fs_EditFile", "Fs_CreateFile", "Fs_RemoveFile", "Fs_RemoveDir", "Fs_MoveFile", "Fs_CopyFile", "Fs_MoveDir", "Fs_CopyDir", "Fs_CreateDir", "Fs_ListDir", "Fs_FileInfo", "Web_Fetch"]
-            },
-            "top_level": ["Fs_FindFile", "Fs_GrepFile", "Web_Search", "Web_Research"],
+            "flat": crate::gen::envelope_summary(manager)["flat"],
+            "batch": crate::gen::envelope_summary(manager)["batch"],
             "overflow": {
                 "when": "serialized result > limits.max_inline_bytes",
                 "shape": { "truncated": "true", "compressed": "bool", "command": "string", "original_bytes": "int", "summary": "string", "full_content_path": "string" }
@@ -53,6 +55,14 @@ pub fn build(manager: &CommandManager) -> Value {
 /// lookup) — used by packaging and skill installation so the generated
 /// schema.json never depends on the build machine's local configuration.
 pub fn build_default() -> ActResult<Value> {
+    let manager = detached_manager()?;
+    Ok(build(&manager))
+}
+
+/// A manager built from default config (no project lookup) — shared by
+/// packaging, skill installation and doc generation so generated artifacts
+/// never depend on the build machine's local configuration.
+pub fn detached_manager() -> ActResult<CommandManager> {
     let cwd = std::env::current_dir().map_err(act_kernel::ActError::Io)?;
     let config = ActConfig {
         roots: vec![cwd],
@@ -61,10 +71,10 @@ pub fn build_default() -> ActResult<Value> {
     let manager = CommandManager::new(config)?;
     act_fs::register_all(&manager)?;
     act_web::register_all(&manager)?;
-    Ok(build(&manager))
+    Ok(manager)
 }
 
-fn error_table() -> Value {
+pub fn error_table() -> Value {
     json!([
         { "code": "permission_denied", "meaning": "路径出根/受保护/URL 策略拒绝", "exitCode": 2, "mcp": "isError:true", "granularity": "whole-call", "guards": ["PathGuard", "ProtectGuard", "UrlGuard", "SandboxRoot"] },
         { "code": "limit_exceeded", "meaning": "超出限额（批量/字节/深度/重定向）", "exitCode": 2, "mcp": "isError:true", "granularity": "whole-call", "guards": ["LimitGuard"] },

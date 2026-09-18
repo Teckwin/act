@@ -27,12 +27,19 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
-      - name: Smoke test (act list / act exec)
+      - name: Smoke test (flags mode / aliases / exec channel)
         shell: bash
         run: |
           cargo run -q --locked --bin act -- list > /tmp/act-list.txt
           head -5 /tmp/act-list.txt
           echo "hello act 中文" > smoke.txt
-          cargo run -q --locked --bin act -- exec Fs_ReadFile --input '{"paths":["smoke.txt"]}' > /tmp/act-read.json
+          # primary: canonical flags
+          cargo run -q --locked --bin act -- Fs_ReadFile --path smoke.txt > /tmp/act-read.json
           grep -q "hello act 中文" /tmp/act-read.json
+          # aliases: command + short param
+          cargo run -q --locked --bin act -- fr -p smoke.txt > /tmp/act-read2.json
+          grep -q "hello act 中文" /tmp/act-read2.json
+          # JSON escape hatch
+          cargo run -q --locked --bin act -- exec Fs_ReadFile --input '{"path":"smoke.txt"}' > /tmp/act-read3.json
+          grep -q "hello act 中文" /tmp/act-read3.json
           rm smoke.txt

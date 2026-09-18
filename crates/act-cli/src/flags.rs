@@ -22,7 +22,18 @@ pub fn is_builtin_subcommand(token: &str) -> bool {
 }
 
 /// Parse flag arguments into a JSON params object for the given command.
+/// Uses the live registry for Sys_Verify's pass-through resolution.
 pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
+    parse_with(info, args, &|token: &str| crate::sys::resolve_info(token))
+}
+
+/// Core parser with an injectable command resolver (tests pass a stub; null
+/// resolver disables pass-through).
+pub fn parse_with(
+    info: &CommandInfo,
+    args: &[String],
+    resolver: &dyn Fn(&str) -> Option<CommandInfo>,
+) -> ActResult<Value> {
     let props = info
         .input_schema
         .get("properties")
@@ -37,6 +48,15 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
         .collect();
 
     let mut out = Map::new();
+    // Pass-through state for Sys_Verify: unknown flags are parsed against the
+    // TARGET command's schema and collected under `target_params`.
+    let passthrough = info
+        .input_schema
+        .get("x-passthrough")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut target_params: Option<Map<String, Value>> = None;
+    let mut target_info_cache: Option<Option<CommandInfo>> = None;
     let mut i = 0usize;
     while i < args.len() {
         let token = &args[i];
@@ -47,14 +67,14 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
             if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_digit()) {
                 return Err(ActError::invalid_params(
                     &info.name,
-                    format!("unexpected positional argument '{token}'; use --flags (JSON channel: act exec)"),
+                    format!("unexpected positional argument '{token}'; use --flags"),
                 ));
             }
             rest
         } else {
             return Err(ActError::invalid_params(
                 &info.name,
-                format!("unexpected positional argument '{token}'; use --flags (JSON channel: act exec)"),
+                format!("unexpected positional argument '{token}'; use --flags"),
             ));
         };
         let (flag_name, inline_value) = match stripped.split_once('=') {
@@ -72,11 +92,54 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
             ));
         }
 
-        // Resolve alias → canonical property name.
-        let (canonical, negated) = resolve(&flag_name, props, &aliases, &info.name)?;
-        let schema_prop = props.get(&canonical).ok_or_else(|| {
-            ActError::invalid_params(&info.name, format!("unknown flag --{flag_name}"))
-        })?;
+        // Resolve alias → canonical property name. For Sys_Verify
+        // (x-passthrough), unknown flags are parsed against the TARGET
+        // command's schema and collected under `target_params`.
+        let (canonical, negated, schema_prop, in_target) =
+            match resolve(&flag_name, props, &aliases, &info.name) {
+                Ok((canonical, negated)) => {
+                    let prop = props
+                        .get(&canonical)
+                        .cloned()
+                        .unwrap_or_else(|| json!("string"));
+                    (canonical, negated, prop, false)
+                }
+                Err(err) => {
+                    if !passthrough {
+                        return Err(err);
+                    }
+                    let target = match &target_info_cache {
+                        Some(cached) => cached.clone(),
+                        None => {
+                            let cached = passthrough_target(args, resolver);
+                            target_info_cache = Some(cached.clone());
+                            cached
+                        }
+                    };
+                    let Some(target) = target else {
+                        return Err(err);
+                    };
+                    let target_props = target
+                        .input_schema
+                        .get("properties")
+                        .and_then(|v| v.as_object())
+                        .cloned()
+                        .unwrap_or_default();
+                    let target_aliases: Vec<(String, String)> = target
+                        .cli_aliases
+                        .iter()
+                        .map(|(a, b)| (normalize_flag(a), b.clone()))
+                        .collect();
+                    let (canonical, negated) =
+                        resolve(&flag_name, &target_props, &target_aliases, &info.name)
+                            .map_err(|_| err)?;
+                    let prop = target_props
+                        .get(&canonical)
+                        .cloned()
+                        .unwrap_or(json!("string"));
+                    (canonical, negated, prop, true)
+                }
+            };
         let prop_type = schema_prop
             .get("type")
             .and_then(|t| t.as_str())
@@ -122,18 +185,27 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
                         &canonical,
                         prop_type,
                         &raw,
-                        schema_prop,
+                        &schema_prop,
                     )?,
                     true,
                 )
             }
         };
 
-        merge(
-            &mut out, &canonical, value, prop_type, &info.name, &flag_name,
-        )?;
+        if in_target {
+            let entry = target_params.get_or_insert_with(Map::new);
+            merge(entry, &canonical, value, prop_type, &info.name, &flag_name)?;
+        } else {
+            merge(
+                &mut out, &canonical, value, prop_type, &info.name, &flag_name,
+            )?;
+        }
         let _ = consumed_next;
         i += 1;
+    }
+
+    if let Some(target_params) = target_params {
+        out.insert("target_params".into(), Value::Object(target_params));
     }
 
     // Fs_EditFile sugar: top-level replace_all applies to every edit that did
@@ -171,6 +243,30 @@ pub fn parse(info: &CommandInfo, args: &[String]) -> ActResult<Value> {
 
 fn normalize_flag(name: &str) -> String {
     name.trim_matches('-').replace('_', "-")
+}
+
+/// Pre-scan `--target <name>` / `--target=<name>` / `-t <name>` and resolve
+/// the target command metadata for pass-through flag parsing (Sys_Verify).
+fn passthrough_target(
+    args: &[String],
+    resolver: &dyn Fn(&str) -> Option<CommandInfo>,
+) -> Option<CommandInfo> {
+    let mut i = 0;
+    while i < args.len() {
+        let token = &args[i];
+        let value = if let Some(v) = token.strip_prefix("--target=") {
+            Some(v.to_string())
+        } else if token == "--target" || token == "-t" {
+            args.get(i + 1).cloned()
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            return resolver(&value);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Resolve a flag (alias or canonical) to a property name. `--no-x` negates

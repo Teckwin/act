@@ -19,13 +19,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Generate schema.json from the kernel binary
+      - name: Generate skill sources with the kernel binary (compiled docs)
         run: |
           cargo build --release --locked --bin act
+          target/release/act Sys_Package --out dist
           mkdir -p skill-src
-          cp packaging/skill/agent-core-tools/SKILL.md skill-src/
-          cp packaging/skill/agent-core-tools/mcp.json skill-src/
-          target/release/act schema > skill-src/schema.json
+          cp dist/agent-core-tools/SKILL.md dist/agent-core-tools/schema.json dist/agent-core-tools/mcp.json skill-src/
 
       - uses: actions/upload-artifact@v4
         with:

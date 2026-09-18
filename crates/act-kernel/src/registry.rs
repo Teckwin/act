@@ -48,6 +48,11 @@ pub enum Capability {
     Write,
     /// Network access.
     Net,
+    /// Kernel meta commands (Sys_*): self-describing / self-managing.
+    /// Exempt from read/write/net switches; still audited. Path/URL guards
+    /// do not apply (no declared path/url fields) except where a handler
+    /// explicitly resolves paths.
+    Meta,
 }
 
 impl Capability {
@@ -56,6 +61,7 @@ impl Capability {
             Capability::Read => "read",
             Capability::Write => "write",
             Capability::Net => "net",
+            Capability::Meta => "meta",
         }
     }
 }

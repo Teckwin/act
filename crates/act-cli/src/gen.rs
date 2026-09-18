@@ -13,15 +13,15 @@ description: Sandboxed, encoding-safe file and web tools for agents. Use when re
 
 # Agent Core Tools (act)
 
-统一沙箱内核，CLI 化调用（本 skill 目录自带二进制，无需任何注册）：
+统一沙箱内核，唯一调用方式（本 skill 目录自带二进制，无需任何注册）：
 
 ```bash
-<BIN> <Command> --flags ...        # 主用法（schema 驱动参数）
-<BIN> exec <Command> --input '<json>'   # JSON 兜底通道（复杂值/对象数组）
+<BIN> <Command|alias> --flags ...      # 命令名或短别名 + schema 驱动参数
 ```
 
 > `<BIN>` = 本 skill 目录下的可执行文件：`~/.claude/skills/agent-core-tools/act`（Windows 为 `act.exe`）。
-> 完整机器可读契约见同目录 `schema.json`（19 命令 schema + 错误码 + 限额，由本二进制生成）。
+> 完整机器可读契约见同目录 `schema.json`（全部命令 schema + 别名 + 输出变体 + 错误码 + 限额，由本二进制生成）。
+> 内置管理命令同样在本契约内（Sys_List/Sys_Verify/Sys_Schema/Sys_Package/Sys_Install/Sys_Serve）。
 "#;
 
 const RULES: &str = r#"
@@ -169,7 +169,10 @@ fn command_section(info: &act_kernel::CommandInfo) -> String {
         ));
     }
 
-    let example = info.example.as_deref().unwrap_or("<flags>");
+    let example = match info.example.as_deref() {
+        Some(e) if !e.is_empty() => e.to_string(),
+        _ => "（无参数）".to_string(),
+    };
     out.push_str(&format!("```bash\nact {} {}\n```\n\n", info.name, example));
 
     // Parameter table from the input schema.
@@ -310,17 +313,18 @@ fn markdown_table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
 }
 
 const CONST_TAIL: &str = r#"
-## JSON 兜底通道
+## 内置管理命令（Sys 域，同契约托管）
 
-复杂值（多键对象数组等）用 exec：
+- `act Sys_List`（别名 list）：全部命令清单；`--json` 输出全量元数据
+- `act Sys_Verify --target <命令|别名> --<目标参数>...`（别名 verify）：权限预检（透传目标命令 flags，不执行）
+- `act Sys_Schema`（别名 schema）：机器可读全量契约
+- `act Sys_Package --out dist`（别名 package）：打包 skill 分发包
+- `act Sys_Install --project|--user [--with-mcp]`（别名 install）：安装本 skill（生成式文档）
+- `act Sys_Serve`（别名 serve/mcp）：可选 MCP stdio 接入通道
 
-```bash
-act exec Fs_EditFile --input '{"path":"a.rs","edits":[{"old":"x","new":"y"}]}'
-```
+## 全局 flag（置于命令名之前）
 
-## 可选：MCP 接入
-
-本 skill 纯 CLI 化，无需注册即可用。如需 MCP 工具形态，参考同目录 `mcp.json` 模板把 `act` 以 `mcp` 参数注册为 stdio server。
+- `--config <path>`：显式配置文件；`--root <path>`：追加沙箱根（可重复）
 "#;
 
 /// Validation hook: every command must carry an example that the flag parser

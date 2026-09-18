@@ -14,6 +14,9 @@ pub fn check(capability: &Capability, caps: &Capabilities, mode: &InvokeMode) ->
         Capability::Read => ("read", mode_caps.read),
         Capability::Write => ("write", mode_caps.write),
         Capability::Net => ("net", mode_caps.net),
+        // Meta commands describe/manage the kernel itself and are always
+        // allowed (they are still audited and output-contract checked).
+        Capability::Meta => return Ok(()),
     };
     if enabled {
         Ok(())

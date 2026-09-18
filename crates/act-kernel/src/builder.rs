@@ -22,9 +22,7 @@ use crate::name::CommandName;
 pub use crate::registry::{Capability, CommandDef, CommandHandler, OutputSpec, Verify};
 
 /// Reserved CLI subcommand names that can never be command aliases.
-pub const RESERVED_ALIASES: &[&str] = &[
-    "exec", "list", "verify", "mcp", "schema", "package", "install", "help",
-];
+pub const RESERVED_ALIASES: &[&str] = &["help"];
 
 /// Validate a short command alias (`fr`, `grep`, …).
 pub fn validate_alias(alias: &str) -> ActResult<()> {
@@ -292,11 +290,11 @@ impl CommandBuilder {
         if let Some(alias) = &self.alias {
             validate_alias(alias)?;
         }
-        if self.params.iter().filter(|p| p.required).count() == 0 {
-            return Err(ActError::InvalidParams {
-                command: self.name.as_str().to_string(),
-                detail: "at least one required param expected".into(),
-            });
+        if self.params.iter().filter(|p| p.required).count() == 0
+            && !self.params.is_empty()
+            && self.name.domain() != "Sys"
+        {
+            tracing::debug!("command {} has no required params", self.name);
         }
         // Duplicate param names / alias collisions inside one command.
         let mut seen = std::collections::HashSet::new();
@@ -466,13 +464,14 @@ mod tests {
 
     #[test]
     fn reserved_and_bad_aliases_rejected() {
-        assert!(validate_alias("exec").is_err());
+        assert!(validate_alias("help").is_err());
         assert!(validate_alias("X").is_err());
         assert!(validate_alias("toolongalias9").is_err());
         assert!(validate_alias("fr").is_ok());
+        assert!(validate_alias("mcp").is_ok());
 
         let err = expect_err(
-            CommandBuilder::new("Fs_Demo", "d", Capability::Read, "list")
+            CommandBuilder::new("Fs_Demo", "d", Capability::Read, "help")
                 .param(Param::string("path").required())
                 .output_done(json!({}))
                 .bind(std::sync::Arc::new(Noop)),

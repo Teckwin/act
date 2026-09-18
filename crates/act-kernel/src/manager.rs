@@ -147,23 +147,28 @@ impl CommandManager {
                     );
                     return Err(err);
                 }
-                // Output policy (overflow + summary).
-                let final_result = self
-                    .output
-                    .apply(name, result, &self.sandbox)
-                    .await
-                    .map_err(|err| {
-                        self.audit_record(
-                            &mode,
-                            name,
-                            audit_paths.clone(),
-                            audit_urls.clone(),
-                            false,
-                            &err,
-                            started,
-                        );
-                        err
-                    })?;
+                // Output policy (overflow + summary). Meta commands
+                // (Sys_Schema/Sys_List --json …) emit the contract document
+                // itself and must never be compressed.
+                let final_result = if def.capability == crate::registry::Capability::Meta {
+                    result
+                } else {
+                    self.output
+                        .apply(name, result, &self.sandbox)
+                        .await
+                        .map_err(|err| {
+                            self.audit_record(
+                                &mode,
+                                name,
+                                audit_paths.clone(),
+                                audit_urls.clone(),
+                                false,
+                                &err,
+                                started,
+                            );
+                            err
+                        })?
+                };
                 self.audit_record(
                     &mode,
                     name,

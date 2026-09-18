@@ -1,9 +1,10 @@
-//! act: Agent Core Tools CLI + MCP stdio server.
+//! act: Agent Core Tools — single dynamic CLI.
 //!
-//! Two invocation styles:
-//! - `act <Command> --flags ...`   (primary, schema-driven)
-//! - `act exec <Command> --input '<json>'`  (JSON escape hatch)
-//! plus management subcommands: list / verify / schema / package / install / mcp.
+//! One invocation style: `act <Command|alias> --flags ...`. All verbs,
+//! including the kernel management commands (Sys_List/Sys_Verify/Sys_Schema/
+//! Sys_Package/Sys_Install/Sys_Serve), are registered through the same
+//! CommandBuilder contract pipeline. Global flags (`--config`, `--root`) may
+//! precede the command name.
 
 mod cli;
 mod flags;
@@ -12,11 +13,12 @@ mod install;
 mod mcp;
 mod package;
 mod schema;
+mod sys;
 #[cfg(test)]
 mod test_support;
 
 use act_kernel::error::ActResult;
-use clap::Parser;
+use std::path::PathBuf;
 
 fn setup_windows_console() {
     #[cfg(windows)]
@@ -29,7 +31,7 @@ fn setup_windows_console() {
     }
 }
 
-/// Restore the default SIGPIPE disposition so `act list | head` terminates
+/// Restore the default SIGPIPE disposition so `act Sys_List | head` terminates
 /// quietly like cat/ls instead of panicking on a broken stdout pipe.
 fn setup_unix_sigpipe() {
     #[cfg(unix)]
@@ -49,19 +51,78 @@ fn init_tracing() {
         .init();
 }
 
-fn looks_like_command(token: &str) -> bool {
-    act_kernel::name::CommandName::parse(token).is_ok()
-        || (token.len() >= 2
-            && token.len() <= 8
-            && token
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_lowercase())
-                .unwrap_or(false)
-            && token
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && !flags::is_builtin_subcommand(token))
+const HELP: &str = "\
+act <Command|alias> --flags ...        # only invocation style
+
+Global flags (before the command name):
+  --config <path>   explicit config file (default: <cwd>/act.config.json or ACT_CONFIG)
+  --root <path>     extra sandbox root (repeatable)
+
+Discover commands:
+  act Sys_List                        # (alias: list) all commands + aliases
+  act Sys_Schema                      # (alias: schema) full machine contract
+  act Sys_Verify --target fr --path a # (alias: verify) permission dry-run
+
+Examples:
+  act Fs_ReadFile --path src/main.rs --limit 100
+  act fr -p src/main.rs               # short aliases
+  act Fs_EditFile --path a.rs --edit \"old=>new\"
+";
+
+/// Split leading global flags (`--config v`, `--root v`, repeatable) from the
+/// rest of the command line.
+fn split_globals(raw: &[String]) -> ActResult<(Option<PathBuf>, Vec<PathBuf>, Vec<String>)> {
+    let mut config = None;
+    let mut roots = Vec::new();
+    let mut i = 0usize;
+    while i < raw.len() {
+        let token = &raw[i];
+        let (name, inline) = match token.strip_prefix("--").and_then(|t| t.split_once('=')) {
+            Some((n, v)) => (n.to_string(), Some(v.to_string())),
+            None => (token.trim_start_matches('-').to_string(), None),
+        };
+        match name.as_str() {
+            "config" => {
+                let value = match inline {
+                    Some(v) => v,
+                    None => {
+                        i += 1;
+                        match raw.get(i) {
+                            Some(v) => v.clone(),
+                            None => {
+                                return Err(act_kernel::ActError::invalid_params(
+                                    "cli",
+                                    "--config expects a value",
+                                ));
+                            }
+                        }
+                    }
+                };
+                config = Some(PathBuf::from(value));
+            }
+            "root" => {
+                let value = match inline {
+                    Some(v) => v,
+                    None => {
+                        i += 1;
+                        match raw.get(i) {
+                            Some(v) => v.clone(),
+                            None => {
+                                return Err(act_kernel::ActError::invalid_params(
+                                    "cli",
+                                    "--root expects a value",
+                                ));
+                            }
+                        }
+                    }
+                };
+                roots.push(PathBuf::from(value));
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    Ok((config, roots, raw[i..].to_vec()))
 }
 
 #[tokio::main]
@@ -71,21 +132,28 @@ async fn main() {
     init_tracing();
 
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    let first = raw.first().map(|s| s.as_str()).unwrap_or("");
+    if raw.is_empty() || raw.iter().any(|t| t == "-h" || t == "--help") {
+        print!("{HELP}");
+        return;
+    }
+    if raw.iter().any(|t| t == "-V" || t == "--version") {
+        println!("act {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
-    // Route `act <Command> --flags` to the dynamic command path when the first
-    // token is a well-formed command name (Domain_Action) that is not one of
-    // the builtin management subcommands.
-    let dynamic = !raw.is_empty()
-        && !first.starts_with('-')
-        && !flags::is_builtin_subcommand(first)
-        && looks_like_command(first);
-
-    let outcome: ActResult<()> = if dynamic {
-        cli::run_dynamic(first, &raw[1..]).await
-    } else {
-        let args = cli::Cli::parse();
-        cli::run(args).await
+    let outcome: ActResult<()> = match split_globals(&raw) {
+        Ok((_config, _roots, rest)) if rest.is_empty() => {
+            print!("{HELP}");
+            Ok(())
+        }
+        Ok((config, roots, rest)) => match cli::build_manager_with(config, roots) {
+            Ok(manager) => {
+                crate::sys::bind_manager(std::sync::Arc::new(manager));
+                cli::run_dynamic(&rest[0], &rest[1..]).await
+            }
+            Err(err) => Err(err),
+        },
+        Err(err) => Err(err),
     };
 
     match outcome {

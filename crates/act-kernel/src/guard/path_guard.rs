@@ -168,13 +168,11 @@ impl PathGuard {
         // may pass a symlinked prefix (e.g. /var/... for /private/var/...),
         // so when the lexically-normalized path misses every root we retry
         // against the fully canonicalized path before denying.
-        let mut effective = normalized.clone();
-        let mut root_match = self.match_root(&effective);
+        let mut root_match = self.match_root(&normalized);
         if root_match.is_none() {
             if let Ok(canon) = std::fs::canonicalize(&normalized) {
                 let canon = strip_verbatim(&canon);
                 if let Some(matched) = self.match_root(&canon) {
-                    effective = canon;
                     root_match = Some(matched);
                 }
             }
